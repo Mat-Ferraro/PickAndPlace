@@ -1,0 +1,11 @@
+https://reprap.org/wiki/RAMPS_1.4
+
+https://protosupplies.com/product/stepper-motor-nema-17-2-5a-42byghw811/
+
+https://learn.watterott.com/silentstepstick/pinconfig/tmc2209/
+
+https://www.amazon.com/dp/B0G2RFLG1L
+
+https://www.amazon.com/dp/B07BK1QL5T
+
+https://www.amazon.com/dp/B0B8HF14T2
