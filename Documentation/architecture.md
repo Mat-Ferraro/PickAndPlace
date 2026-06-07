@@ -167,7 +167,8 @@ via `current_op` in the status message.
 State-machine rules: E-stop is checked continuously; the safety layer runs
 independently of the program executor and cannot be suppressed by any program
 instruction; GUI commands are requests that firmware state rules may accept or NACK
-with a reason.
+with a reason. See §11 for the two continuous safety monitors (laser park interlock
+and pickup loss detection) that trigger FAULTED regardless of program state.
 
 ## 9. Physical controls and safety
 
@@ -216,9 +217,25 @@ hardware faults from the safety layer abort it immediately regardless of what
 instruction is executing.
 
 Rules: safety layer checks run between every executor instruction; E-stop is a
-threading event that any blocking machine operation must honour; pickup-loss and
-probe failure are program-level faults that halt the executor; sensor polling stays
+threading event that any blocking machine operation must honour; sensor polling stays
 active headless; state transitions are logged/reported.
+
+**Continuous safety monitors (run independently of program execution):**
+
+1. **Laser park interlock.** ToF ch4 must read within the parked-threshold during
+   any arm movement. If the laser head leaves its park position while the arm is
+   moving (or before a move is started), abort motion and raise `laser_not_parked`.
+   The arm must not move unless `laser_safe` is confirmed. This is a firmware-level
+   check — it cannot be bypassed by a program instruction.
+
+2. **Pickup loss detection.** While the pump is ON and the arm is moving, all four
+   pickup ToF sensors (ch0–3) are polled. If none read below the grip-threshold
+   (object no longer detected), raise `pickup_lost` and stop motion immediately.
+   This catches workpieces dropped mid-transit and arm moves with nothing grabbed.
+
+Both faults transition the machine to FAULTED, halt the program executor, and
+require an explicit `reset_fault` + `home` before resuming. Neither can be caught
+or handled from within the job program.
 
 ## 12. Persistent configuration
 

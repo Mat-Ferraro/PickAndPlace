@@ -84,9 +84,28 @@ Live questions that are not yet settled. Move an item into the relevant doc
 ## Protocol
 
 - ~~Protocol v0.9 locked~~ **Resolved.** See `communication-protocol.md`.
+- ~~Program editor tab~~ **Resolved.** Waypoint-based editor implemented.
+  Generates MOVE / PROBE_Z sequences from a table. Load, save, validate, upload.
+
 - **Chunked `load_program` transfer.** The GUI currently sends the entire
   program JSON in a single TCP line (limit raised to 64 KB in simulator).
   Real Mega firmware needs proper chunked transfer as defined in
   `communication-protocol.md` §4.3. Implement before hardware bring-up.
-- **Program editor tab.** GUI tab for writing, editing, and uploading job
-  programs. Not yet implemented.
+
+- **Multi-sheet odd-batch limitation.** If a loop iteration picks up more than
+  one sheet and the total batch count is odd, the final pickup attempt on the last
+  iteration fails silently — the arm executes the waypoints with nothing grabbed.
+  Resolution requires pickup verification: a READ_SENSOR step after each pickup
+  that checks ch0–3 and branches on failure. Defer until hardware validation
+  informs the threshold values and failure modes. For now, multi-sheet programs
+  require even batch counts.
+
+- **Continuous safety monitors not yet in simulator.** Two firmware-level
+  safety checks are documented in `architecture.md` §11 but not yet implemented
+  in `simulator.py`:
+  1. **Laser park interlock** — fault `laser_not_parked` if arm moves while
+     ToF ch4 reads out-of-range.
+  2. **Pickup loss detection** — fault `pickup_lost` if pump ON + arm moving +
+     all pickup ToF sensors (ch0–3) lose the object.
+  These must be implemented in firmware before hardware bring-up. Simulator
+  implementation is optional but would improve fault-injection test coverage.

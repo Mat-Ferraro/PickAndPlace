@@ -97,10 +97,13 @@ class MachineState:
     y_mm: float = 0.0
     z_mm: float = 0.0
     taught: Dict[str, Tuple[float, float, float]] = field(default_factory=lambda: {
-        "home":    (0.0,   0.0,   0.0),
-        "laser_a": (150.0, 80.0,  10.0),
-        "laser_b": (200.0, 80.0,  10.0),
-        "deposit": (50.0,  200.0, 5.0),
+        **{
+            "home":    (0.0,   0.0,   0.0),
+            "laser_a": (150.0, 80.0,  10.0),
+            "laser_b": (200.0, 80.0,  10.0),
+            "deposit": (50.0,  200.0, 5.0),
+        },
+        **_load_positions(),   # saved positions override defaults
     })
     tof_dist_mm: list = field(default_factory=lambda: [150, 150, 150, 150, 30, 25])
     tof_valid:   list = field(default_factory=lambda: [True] * 6)
@@ -244,6 +247,29 @@ class SimulatedMachine(MachineInterface):
 
     def log(self, message):
         self._out.put(json.dumps({"type": "log", "message": message}))
+
+
+POSITIONS_FILE = "pnp_positions.json"
+
+
+def _load_positions() -> dict:
+    """Load saved named positions from disk, falling back to defaults."""
+    try:
+        with open(POSITIONS_FILE) as f:
+            raw = json.load(f)
+        # JSON stores lists [x,y,z]; convert to tuples
+        return {k: tuple(v) for k, v in raw.items()}
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _save_positions(taught: dict) -> None:
+    """Persist named positions to disk as JSON."""
+    try:
+        with open(POSITIONS_FILE, "w") as f:
+            json.dump({k: list(v) for k, v in taught.items()}, f, indent=2)
+    except OSError as e:
+        print(f"[sim] Warning: could not save positions: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +474,7 @@ class StateMachine:
         if name not in NAMED_POSITIONS:
             self.send({"type":"nack","id":i,"cmd":"teach_position","reason":"invalid_param"}); return
         self.ms.taught[name] = (self.ms.x_mm, self.ms.y_mm, self.ms.z_mm)
+        _save_positions(self.ms.taught)
         self.send({"type":"ack","id":i,"cmd":"teach_position"})
 
     def _cmd_query_position(self, i, m):
@@ -468,6 +495,7 @@ class StateMachine:
         if name not in NAMED_POSITIONS or None in (x,y,z):
             self.send({"type":"nack","id":i,"cmd":"save_position","reason":"invalid_param"}); return
         self.ms.taught[name] = (float(x),float(y),float(z))
+        _save_positions(self.ms.taught)
         self.send({"type":"ack","id":i,"cmd":"save_position"})
 
     def _cmd_set_param(self, i, m):
@@ -484,6 +512,7 @@ class StateMachine:
         self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":self.ms.params[k]})
 
     def _cmd_save_config(self, i, m):
+        _save_positions(self.ms.taught)
         self.send({"type":"ack","id":i,"cmd":"save_config"})
 
     def _cmd_load_config(self, i, m):

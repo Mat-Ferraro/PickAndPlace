@@ -310,7 +310,9 @@ Full parameter key list to be defined when the persistent-config schema is locke
 
 | Reason | Cause |
 |---|---|
-| `probe_failed` | `PROBE_Z` did not detect a surface within `probe_max_depth_mm`. |
+| `probe_failed`      | `PROBE_Z` did not detect a surface within `probe_max_depth_mm`. |
+| `pickup_lost`       | Pump ON + arm moving + all pickup ToF sensors (ch0–3) lost the object. Motion aborted immediately. |
+| `laser_not_parked`  | Arm move attempted or in progress while laser head not in park position (ToF ch4 out of range). Motion aborted. |
 | `wait_timeout` | `WAIT` condition not met before `timeout_ms` elapsed. |
 | `loop_overflow` | A loop exceeded the 10,000-iteration safety limit. |
 | `call_depth` | Subroutine call depth exceeded 8 levels. |
