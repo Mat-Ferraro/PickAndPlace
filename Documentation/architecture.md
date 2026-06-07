@@ -124,12 +124,12 @@ the display), unless an address conflict forces otherwise.
 
 ## 6. Vacuum system
 
-One vacuum pump plus one solenoid valve for vacuum release. The servo-valve option
-is no longer under consideration.
+One vacuum pump plus one vacuum-release mechanism.
 
-- **Pump:** DC vacuum pump (datasheet still needed — most important remaining gap).
-- **Release:** solenoid valve. Requires a driver and flyback/transient suppression
-  on the inductive load (see driver candidates below).
+| Release option | Status |
+|---|---|
+| MG90S-style servo valve | Servo movement tested; simple if the valve linkage is acceptable |
+| Solenoid valve | Open; needs a driver + flyback protection |
 
 Pickup is verified by the four pickup ToF sensors rather than vacuum pressure alone
 (a pressure sensor could be added later).
@@ -141,30 +141,6 @@ experiments only, not preferred); or a **RAMPS MOSFET output** — now more plau
 since the RAMPS power MOSFETs are logic-level STP55NF06L parts [ref: RAMPS manual],
 pending a current-path/connector/fuse check (RAMPS outputs are gated by ~5 A/~11 A
 polyfuses). See `open-decisions.md`.
-
-## 6.1 Servo actuators
-
-Two MG90S-style micro servos are used for mechanical actuation.
-
-| Servo | RAMPS header | Pin | Function |
-|---|---|---:|---|
-| Door servo | SERVO2 | D5 | Opens a door/gate so cut paper falls through to the deposit area during `DEPOSITING`. |
-| Laser button servo | SERVO3 | D4 | Physically presses the laser cutter start button at the end of `PLACING`. |
-
-Both servos take their signal from RAMPS servo headers (PWM-capable) and draw power
-from an external regulated 5 V supply — not the RAMPS 5 V rail. The ground of the
-external 5 V supply must be tied to Mega/RAMPS ground.
-
-Named positions (`open`/`closed`, `press`/`release`) map to configurable angles
-stored in EEPROM. This lets the angles be tuned from the GUI without firmware
-changes. Default angles are set conservatively and must be calibrated on the bench
-before a job run.
-
-**Sequence integration:**
-- `PLACING` → `WAITING_FOR_CUT`: laser button servo presses, then releases (~0.3 s
-  dwell) to trigger the laser cutter.
-- `DEPOSITING`: door servo opens after a short dwell (~0.5 s) to allow cut parts to
-  fall through, then closes before the state completes.
 
 ## 7. Homing and travel limits
 
@@ -181,14 +157,17 @@ for both operator controls and axis limits. See `pin-mapping.md` and
 Named positions: Home/Uncut Paper, Laser Position A, Laser Position B, Deposit
 Finished Parts. Positions should be teachable from the GUI and stored persistently.
 
-States: `IDLE, HOMING, READY, PICKING, VERIFY_PICKUP, MOVING_TO_LASER,
-WAITING_FOR_LASER_SAFE, PLACING, WAITING_FOR_CUT, RETRIEVING, DEPOSITING, PAUSED,
-FAULTED, ESTOPPED`.
+States: `IDLE, HOMING, READY, RUNNING, PAUSED, FAULTED, ESTOPPED`.
 
-State-machine rules: E-stop is checked continuously; pickup-loss faults stop motion
-immediately and require operator intervention (no auto-recovery after workpiece
-loss); GUI commands are requests that firmware state rules may accept or NACK with a
-reason.
+The detailed mid-job states (PICKING, VERIFY_PICKUP, MOVING_TO_LASER, etc.) that
+appeared in earlier revisions have been retired. That sequencing is now expressed
+inside the **job program** (see §15 and `job-program.md`) and reported to the GUI
+via `current_op` in the status message.
+
+State-machine rules: E-stop is checked continuously; the safety layer runs
+independently of the program executor and cannot be suppressed by any program
+instruction; GUI commands are requests that firmware state rules may accept or NACK
+with a reason.
 
 ## 9. Physical controls and safety
 
@@ -222,12 +201,23 @@ The firmware is the runtime authority.
 
 ## 11. Firmware architecture
 
-Organize around: a state machine, non-blocking/interruptible motion, periodic sensor
-polling, a fault manager, a command parser, a status reporter, a hardware
-abstraction layer, and calibration/config storage.
+Organize around two distinct layers:
 
-Rules: avoid long blocking delays in production states; E-stop and sensor-fault
-checks run during motion; pickup-loss can interrupt movement; sensor polling stays
+**Safety layer (always running):**
+State machine (`IDLE → HOMING → READY → RUNNING → PAUSED / FAULTED / ESTOPPED`),
+E-stop monitoring, fault manager, command parser, status reporter, hardware
+abstraction layer, calibration/config storage.
+
+**Program executor (runs within RUNNING):**
+Interpreter that reads a stored job program and executes it instruction by
+instruction. The same instruction set runs in the Python simulator (`interpreter.py`)
+and will be ported to C++ for the Mega. The executor is interruptible — E-stop and
+hardware faults from the safety layer abort it immediately regardless of what
+instruction is executing.
+
+Rules: safety layer checks run between every executor instruction; E-stop is a
+threading event that any blocking machine operation must honour; pickup-loss and
+probe failure are program-level faults that halt the executor; sensor polling stays
 active headless; state transitions are logged/reported.
 
 ## 12. Persistent configuration
@@ -244,7 +234,28 @@ Persistent config should include a schema/version byte, CRC/checksum, factory
 defaults, explicit save/load commands, invalid-config behavior, and EEPROM wear
 protection. Do not auto-save every loop or on every streamed GUI edit.
 
+## 15. Software development stack
+
+Three Python files form the development stack that allows GUI development and
+end-to-end testing before any hardware is available.
+
+```
+pnp_gui.py          Windows operator interface
+    │  JSON over TCP (socket://localhost:9999/)
+simulator.py        Fake Arduino — speaks the protocol, enforces state machine
+    │  calls
+interpreter.py      Program execution engine — runs job JSON programs
+    │  implements
+MachineInterface    Abstract hardware layer (SimulatedMachine in simulator;
+                    real drivers in firmware)
+```
+
+`interpreter.py` is the reference implementation of the program executor.
+The C++ firmware port must match its behaviour exactly. Programs authored in
+the GUI and validated by the Python interpreter will run unchanged on the Mega.
+
 ## 13. System diagram
+
 
 ```
 Windows GUI
@@ -254,9 +265,7 @@ Arduino Mega 2560
 RAMPS 1.4
    ├─ TMC2209 drivers → X, Y1, Y2, Z steppers
    ├─ Endstop / button inputs
-   ├─ Servo headers
-   │    ├─ SERVO2 / D5 → door servo (cut-paper drop gate)
-   │    └─ SERVO3 / D4 → laser button servo (starts laser cutter)
+   ├─ Servo header (vacuum release)
    ├─ MOSFET outputs (pump / valve)  [logic-level STP55NF06L]
    └─ I2C (5 V)
         ├─ SSD1309 OLED (optional, upstream)
@@ -266,17 +275,22 @@ RAMPS 1.4
 
 ## 14. GUI responsibilities
 
-The GUI is a setup/command/monitoring/service interface (see §9), organized into
-three screens:
+The GUI (`pnp_gui.py`) is a setup, command, monitoring, and service interface
+implemented in PyQt6. It connects to either the Python simulator over TCP
+(`socket://localhost:9999/`) or the Mega over a USB COM port. Four tabs:
 
-- **Run:** machine state, current named position, current operation, sensor status,
-  fault status, Start/Pause/Stop controls, E-stop status display, last
-  ACK/NACK/error.
-- **Calibration:** teach positions, sensor-threshold calibration, ToF channel
-  testing, servo/valve position calibration, motion jog controls, homing test.
-- **Service:** raw sensor values, output control, stepper test controls, pump/valve
-  test controls, endstop/button state, driver/temperature diagnostics (if
-  implemented), communication log.
+- **Run:** state banner, sensor indicators (pickup, material, laser safe, e-stop),
+  program name and current instruction, Load Program / Run Program / Pause / Resume
+  / E-Stop / Reset controls with correct enable/disable per state.
+- **Service:** target position inc/dec controls (X/Y/Z), named positions table with
+  Teach Current / Teach Target actions, servo and output test controls with
+  state-aware button colours, raw input indicators.
+- **Comms:** ToF sensor table, raw communications log (TX/RX JSON).
+- **Events:** timestamped log of user actions, program steps, state transitions, and
+  faults; filterable by category; saveable as .txt or .csv.
 
-These screens consume the protocol in `communication-protocol.md` and can be built
-against the host-side simulator before hardware is available.
+A **program editor tab** is planned: write/edit job programs in JSON within the GUI,
+validate locally, upload to the machine, and retrieve the stored program.
+
+The GUI is built against the protocol in `communication-protocol.md`. The simulator
+allows full GUI development and testing without hardware.

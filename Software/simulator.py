@@ -169,6 +169,9 @@ class SimulatedMachine(MachineInterface):
         self._ms  = ms
         self._out = out_queue
 
+    def get_position(self) -> tuple:
+        return (self._ms.x_mm, self._ms.y_mm, self._ms.z_mm)
+
     def move_to(self, x, y, z, stop_event, speed_pct=80):
         ms    = self._ms
         speed = max(self.MOVE_SPEED * speed_pct / 100.0, 1.0)

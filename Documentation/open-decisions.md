@@ -1,7 +1,21 @@
 # Open Decisions
 
-Live questions that are not yet settled. Move an item into the relevant doc (and
-delete it here) once it is locked.
+Live questions that are not yet settled. Move an item into the relevant doc
+(and delete it here) once it is locked.
+
+---
+
+## Resolved since last revision
+
+- **Vacuum release** → solenoid valve confirmed. See `architecture.md` §6.
+- **Servo assignments** → door servo SERVO2/D5, laser button SERVO3/D4.
+  See `architecture.md` §6.1 and `pin-mapping.md`.
+- **Firmware state machine** → simplified to 7 states (IDLE, HOMING, READY,
+  RUNNING, PAUSED, FAULTED, ESTOPPED). Detailed mid-job states moved into
+  job programs. See `communication-protocol.md` §2.
+- **Job execution model** → program interpreter confirmed. Python reference
+  implementation in `interpreter.py`; C++ port deferred to hardware phase.
+- **GUI framework** → PyQt6 + pyserial. Simulator over TCP socket.
 
 ---
 
@@ -41,7 +55,7 @@ delete it here) once it is locked.
 - **Pump model, voltage, continuous current, and startup/stall current** — pump
   datasheet still needed. Most important missing reference.
 - Pump speed control vs simple ON/OFF.
-- ~~Vacuum release~~ **Resolved:** solenoid valve confirmed. See `architecture.md` §6.
+- Vacuum release: servo valve, solenoid valve, or pump reversal.
 - Pump/valve driver: relay vs MOSFET module vs **RAMPS MOSFET output**. The RAMPS
   output is now more plausible (logic-level STP55NF06L parts), pending a
   current-path / connector / fuse-rating check (~5 A / ~11 A polyfuses).
@@ -49,7 +63,6 @@ delete it here) once it is locked.
 
 ## Operator interface / system
 
-- ~~Servo assignments~~ **Resolved:** door servo on SERVO2/D5, laser button servo on SERVO3/D4. See `architecture.md` §6.1 and `pin-mapping.md`.
 - Whether the SSD1309 OLED is in the final operator panel.
 - Whether LCD/encoder manual input is needed.
 - Whether thermistors are needed.
@@ -70,5 +83,10 @@ delete it here) once it is locked.
 
 ## Protocol
 
-- Lock the full command set, status fields, reason codes, and framing rules — see
-  `communication-protocol.md` §4.
+- ~~Protocol v0.9 locked~~ **Resolved.** See `communication-protocol.md`.
+- **Chunked `load_program` transfer.** The GUI currently sends the entire
+  program JSON in a single TCP line (limit raised to 64 KB in simulator).
+  Real Mega firmware needs proper chunked transfer as defined in
+  `communication-protocol.md` §4.3. Implement before hardware bring-up.
+- **Program editor tab.** GUI tab for writing, editing, and uploading job
+  programs. Not yet implemented.

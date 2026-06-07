@@ -1,61 +1,52 @@
-# Documentation Change Log
 
-## v0.7
+## v0.9
 
-- Applied package-review fixes from the v0.6 audit.
-- Moved `tmc2209_datasheet_rev1.09.pdf` into the held-reference list and added
-  TMC2209 StepStick notes: STEP/DIR-first approach, UART optional later, current
-  limit/orientation warnings, and external-driver fallback.
-- Added the VL53L0X 8-bit vs 7-bit address warning: datasheet address `0x52` maps
-  to Arduino/Wire address `0x29`.
-- Added practical JSON serial limits: one JSON object per line, recommended maximum
-  line length, status-rate limits, command timeout behavior, NACK rules for
-  malformed/oversized packets, and job/config loading implications for headless
-  operation.
-- Added homing/limit-switch and dual-Y gantry-squaring decisions as high-impact
-  motion items.
-- Added persistent-config implementation notes: schema version, CRC/checksum,
-  defaults, explicit save, invalid-config behavior, and EEPROM wear limits.
-- Cleaned up README bring-up wording and replaced unstable Amazon `clp` links with
-  stable product/listing URLs where known.
+- **Major software development phase — GUI, simulator, interpreter.**
+- Reorganized from a single architecture document into separate focused files
+  (`communication-protocol.md`, `job-program.md`, and the software files below).
+- **Protocol v0.9:** Simplified state machine from 14 states to 7 (`IDLE`,
+  `HOMING`, `READY`, `RUNNING`, `PAUSED`, `FAULTED`, `ESTOPPED`). Retired
+  `start_job`; added `load_program`, `get_program`, `run_program`. Added
+  executor status fields (`current_op`, `step_index`, `loop_iter`, `variables`)
+  to the periodic status message. Added `x_mm`/`y_mm`/`z_mm` to status.
+  Added `query_positions`, `move_to`, `save_position` commands. Added
+  `laser_interlock_mode` config param with expandable mode table.
+- **`interpreter.py`:** Standalone Python program execution engine implementing
+  the full instruction set from `job-program.md`. Supports MOVE, PROBE_Z, HOME,
+  OUTPUT, READ_SENSOR, WAIT, DELAY, LOOP_WHILE, LOOP_FOR, IF, CALL/RETURN,
+  SET_VAR, LOG, HALT, FAULT. Pause/resume via threading events. E-stop abort.
+  Loop overflow (10,000 iter) and call depth (8 levels) safety limits.
+  ProgramValidator for load-time checking. Reference implementation for the
+  eventual C++ firmware port.
+- **`simulator.py` (v0.3):** Fully rebuilt around the interpreter. TCP server
+  on `localhost:9999`. 7-state safety layer wraps interpreter thread. Simulated
+  motion with configurable speed and minimum move duration. Virtual surface
+  heights for PROBE_Z simulation (`surface_home`, `surface_deposit` console
+  commands). Console commands: `load`, `run`, `pause`, `resume`, `fault`,
+  `estop`, `laser_home/busy`, `material on/off`, `surface_home/deposit`.
+- **`pnp_gui.py` (v0.2):** PyQt6 GUI with four tabs: Run, Service, Comms,
+  Events. Run tab: state banner, sensor indicators, program name/current op,
+  Load Program / Run Program / Pause / Resume / E-Stop controls with correct
+  enable/disable per state. Service tab: target position with per-axis inc/dec,
+  named positions table with Teach Current / Teach Target, servo and output
+  controls with state-aware button colors. Comms tab: ToF sensor table and
+  communications log. Events tab: timestamped log of user actions, program steps,
+  state transitions, and faults; filter by category; save as .txt or .csv.
+- **`job-program.md`:** First-class instruction set specification covering
+  program format, all instruction types, variables, conditions, subroutines,
+  safety rules, EEPROM storage notes, and a full example program.
+- **`demo_program.json`:** 3-cycle pick-and-place demonstration program
+  exercising all major instruction types and subroutines. ~6 minutes runtime
+  per run. Full cycle confirmed working end-to-end.
+- **Architecture updates:** Vacuum release confirmed as solenoid (servo-valve
+  option retired). Two servos added: door servo (SERVO2/D5) and laser button
+  servo (SERVO3/D4). Servo assignments added to `pin-mapping.md`.
+- **`open-decisions.md`:** Closed vacuum release and servo assignment decisions.
 
-## v0.6
+## v0.8
 
-- **Reorganized** the single `..._v0_5.md` document into a focused set: `README.md`,
-  `architecture.md`, `pin-mapping.md`, `communication-protocol.md`,
-  `components-and-references.md`, `open-decisions.md`, and this changelog.
-- Separated settled design (architecture) from the live decision log and promoted
-  the JSON serial protocol to a first-class contract document.
-- Folded in datasheet-verified specs from the four reference PDFs now on hand
-  (Arduino Mega pinout, RAMPS 1.4 manual, TCA9548A, VL53L0X):
-  - **VL53L0X:** confirmed ~2.8 V part, signal pins 3.6 V-max (not 5 V-tolerant),
-    fixed default I2C address 0x52, XSHUT/GPIO1 behavior, timing/current, and the
-    calibration set. Resolves the old "sensor voltage note."
-  - **TCA9548A:** address range 0x70–0x77 (build uses 0x70), single 8-bit
-    channel-bitmask register, 5 V-tolerant, voltage-translation capable. Added a
-    design note on using the mux to bridge the 5 V Mega bus to 3.3 V sensors.
-  - **Mega:** confirmed I2C pins, the four free hardware-interrupt pins
-    (D2/D3/D18/D19), and the 20 mA/pin and 50 mA/3.3 V current ceilings.
-  - **RAMPS:** identified the power MOSFETs as logic-level STP55NF06L and noted the
-    ~5 A/~11 A polyfuses — informs the pump-driver decision.
-- Added a reference-documentation index tracking PDFs on hand vs. still needed, and
-  noted that VL53L0X control requires the API user manual UM2039.
-- Flagged the unresolved gantry-vs-arm question as a blocking item.
-
-## v0.5
-
-- Added purchased/candidate module inventory; relay, L298N, and SSD1309 notes;
-  pump/valve driver comparison; local-display section; expanded vendor checklist;
-  architecture diagram updated for upstream I2C OLED + TCA9548A mux.
-
-## v0.4
-
-- Added verified bench bring-up status; power architecture; RAMPS pin mapping;
-  USB serial as the primary link; E-stop hardware-vs-software distinction; TMC2209
-  orientation/current-limit warnings; ToF/TCA9548A integration; firmware
-  architecture and persistent-config sections; vendor documentation list.
-
-## v0.3
-
-- Initial system architecture: Mega/RAMPS, 4 steppers, 6 ToF sensors, headless
-  operation, GUI responsibilities, JSON protocol, high-level states.
+- Applied review fixes; split documentation into focused file set.
+- Added VL53L0X 8-bit vs 7-bit address warning.
+- Added homing/limit-switch and dual-Y gantry decisions as blocking items.
+- Added persistent-config implementation notes.
+- Initial GUI and simulator scaffolding.

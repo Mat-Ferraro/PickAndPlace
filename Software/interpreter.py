@@ -43,6 +43,11 @@ class MachineInterface(ABC):
     """
 
     @abstractmethod
+    def get_position(self) -> tuple:
+        """Return (x_mm, y_mm, z_mm) — current arm position."""
+        ...
+
+    @abstractmethod
     def move_to(self, x: float, y: float, z: float,
                 stop_event: threading.Event, speed_pct: int = 80) -> None: ...
 
@@ -78,7 +83,7 @@ class ProgramValidator:
 
     _REQUIRED: dict = {
         'MOVE':       ['x', 'y', 'z'],
-        'PROBE_Z':    ['x', 'y', 'approach_z', 'store'],
+        'PROBE_Z':    ['x', 'y', 'store'],   # approach_z optional — defaults to current Z
         'HOME':       ['axes'],
         'OUTPUT':     ['name', 'value'],
         'READ_SENSOR':['sensor', 'store'],
@@ -256,10 +261,14 @@ class ProgramInterpreter:
             self._resolve(instr['z']), self._stop, speed)
 
     def _exec_probe_z(self, instr: dict) -> None:
+        # x, y are required; approach_z optional — defaults to current Z
+        # (user controls approach height with a preceding MOVE command)
+        _, _, cz   = self._machine.get_position()
+        x          = self._resolve(instr['x'])
+        y          = self._resolve(instr['y'])
+        approach_z = self._resolve(instr['approach_z']) if 'approach_z' in instr else cz
         z = self._machine.probe_z(
-            self._resolve(instr['x']),
-            self._resolve(instr['y']),
-            self._resolve(instr['approach_z']),
+            x, y, approach_z,
             self._cfg.get('probe_step_mm', 0.5),
             self._cfg.get('probe_max_depth_mm', 200.0),
             self._cfg.get('probe_threshold_mm', 40.0),
