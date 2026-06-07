@@ -11,12 +11,14 @@ import json
 import queue
 import sys
 import time
+from datetime import datetime
 from typing import Optional
 
 import serial
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QTextCursor, QColor
 from PyQt6.QtWidgets import (
+    QFileDialog,
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QLabel, QPushButton, QLineEdit, QTabWidget,
@@ -32,28 +34,19 @@ from PyQt6.QtWidgets import (
 # ---------------------------------------------------------------------------
 
 STATE_COLORS = {
-    "IDLE":                   "#95a5a6",
-    "HOMING":                 "#3498db",
-    "READY":                  "#27ae60",
-    "PICKING":                "#2980b9",
-    "VERIFY_PICKUP":          "#2980b9",
-    "MOVING_TO_LASER":        "#2980b9",
-    "WAITING_FOR_LASER_SAFE": "#e67e22",
-    "PLACING":                "#2980b9",
-    "WAITING_FOR_CUT":        "#e67e22",
-    "RETRIEVING":             "#2980b9",
-    "DEPOSITING":             "#2980b9",
-    "PAUSED":                 "#f39c12",
-    "FAULTED":                "#e74c3c",
-    "ESTOPPED":               "#c0392b",
+    "IDLE":      "#95a5a6",   # gray
+    "HOMING":    "#3498db",   # blue
+    "READY":     "#27ae60",   # green
+    "RUNNING":   "#2980b9",   # active blue
+    "PAUSED":    "#f39c12",   # yellow
+    "FAULTED":   "#e74c3c",   # red
+    "ESTOPPED":  "#c0392b",   # dark red
 }
 
 BUTTON_STATES = {
     "home":        {"IDLE", "READY"},
-    "start_job":   {"READY"},
-    "pause":       {"PICKING", "VERIFY_PICKUP", "MOVING_TO_LASER",
-                    "WAITING_FOR_LASER_SAFE", "PLACING",
-                    "WAITING_FOR_CUT", "RETRIEVING", "DEPOSITING"},
+    "run_program": {"READY"},   # also requires _program_loaded
+    "pause":       {"RUNNING"},
     "resume":      {"PAUSED"},
     "reset_fault": {"FAULTED"},
     "reset_estop": {"ESTOPPED"},
@@ -112,11 +105,13 @@ def _label(text: str, bold: bool = False, pt: int = 0) -> QLabel:
 
 def _style_btn(btn: QPushButton, active: bool, key: str):
     """Apply active/inactive colour to a state-tracking button."""
-    color = BTN_COLORS[key][0] if active else BTN_COLORS[key][1]
+    color      = BTN_COLORS[key][0] if active else BTN_COLORS[key][1]
     text_color = "white" if active else "#555"
-    weight = "bold" if active else "normal"
+    weight     = "bold"  if active else "normal"
     btn.setStyleSheet(
-        f"background-color:{color}; color:{text_color}; font-weight:{weight};"
+        f"QPushButton {{ background-color:{color}; color:{text_color};"
+        f" font-weight:{weight}; }}"
+        " QPushButton:disabled { background-color: #bdc3c7; color: #888; font-weight: normal; }"
     )
 
 
@@ -143,6 +138,115 @@ class StatusLight(QLabel):
 
     def set_bool(self, value: bool, true_color="green", false_color="gray"):
         self.set_color(true_color if value else false_color)
+
+
+
+# ---------------------------------------------------------------------------
+# Event log
+# ---------------------------------------------------------------------------
+
+CATEGORY_COLORS = {
+    "USER":    "#2980b9",   # blue
+    "PROGRAM": "#27ae60",   # green
+    "STATE":   "#8e44ad",   # purple
+    "FAULT":   "#e74c3c",   # red
+    "SYSTEM":  "#7f8c8d",   # gray
+}
+
+
+class EventLog(QWidget):
+    """Timestamped, categorised, saveable event log."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._entries: list = []   # (iso_ts, display_ts, category, message)
+        self._active_filter = "ALL"
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(6)
+
+        # Toolbar
+        bar = QHBoxLayout()
+        self._filter_combo = QComboBox()
+        self._filter_combo.addItems(["ALL", "USER", "PROGRAM", "STATE",
+                                     "FAULT", "SYSTEM"])
+        self._filter_combo.currentTextChanged.connect(self._apply_filter)
+        bar.addWidget(QLabel("Filter:"))
+        bar.addWidget(self._filter_combo)
+        bar.addStretch()
+        clear_btn = QPushButton("Clear")
+        save_btn  = QPushButton("Save Log…")
+        clear_btn.clicked.connect(self._clear)
+        save_btn.clicked.connect(self._save)
+        bar.addWidget(clear_btn)
+        bar.addWidget(save_btn)
+        root.addLayout(bar)
+
+        self._display = QTextEdit()
+        self._display.setReadOnly(True)
+        self._display.setFont(QFont("Courier New", 9))
+        root.addWidget(self._display)
+
+    # ---- Public API -------------------------------------------------------
+
+    def append(self, category: str, message: str) -> None:
+        now         = datetime.now()
+        iso_ts      = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        display_ts  = now.strftime("%H:%M:%S.%f")[:-3]
+        self._entries.append((iso_ts, display_ts, category, message))
+        if self._active_filter in ("ALL", category):
+            self._write_line(display_ts, category, message)
+
+    def _write_line(self, display_ts: str, category: str, message: str) -> None:
+        color = CATEGORY_COLORS.get(category, "#000000")
+        self._display.setTextColor(QColor(color))
+        self._display.append(
+            f"[{display_ts}]  [{category:<7}]  {message}")
+        self._display.moveCursor(QTextCursor.MoveOperation.End)
+
+    # ---- Filter -----------------------------------------------------------
+
+    def _apply_filter(self, filter_val: str) -> None:
+        self._active_filter = filter_val
+        self._display.clear()
+        for iso_ts, display_ts, category, message in self._entries:
+            if filter_val in ("ALL", category):
+                self._write_line(display_ts, category, message)
+
+    # ---- Clear ------------------------------------------------------------
+
+    def _clear(self) -> None:
+        self._entries.clear()
+        self._display.clear()
+
+    # ---- Save -------------------------------------------------------------
+
+    def _save(self) -> None:
+        default = f"pnp_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Save Event Log", default,
+            "Text files (*.txt);;CSV files (*.csv)"
+        )
+        if not path:
+            return
+        is_csv = path.lower().endswith(".csv") or "CSV" in selected_filter
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                if is_csv:
+                    f.write("Timestamp,Category,Message\n")
+                    for iso_ts, _, category, message in self._entries:
+                        safe = message.replace('"', '""')
+                        f.write(f'"{iso_ts}","{category}","{safe}"\n')
+                else:
+                    f.write(f"Pick-and-Place Event Log\n")
+                    f.write(f"Exported: {datetime.now().isoformat()}\n")
+                    f.write("-" * 60 + "\n")
+                    for iso_ts, _, category, message in self._entries:
+                        f.write(f"[{iso_ts}]  [{category:<7}]  {message}\n")
+        except Exception as exc:
+            QMessageBox.warning(self, "Save Error", str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -238,8 +342,9 @@ class RunTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._state     = "IDLE"
-        self._connected = False
+        self._state          = "IDLE"
+        self._connected      = False
+        self._program_loaded = False
         self._build_ui()
         self._update_buttons()
 
@@ -262,13 +367,15 @@ class RunTab(QWidget):
 
         info_form = QFormLayout()
         info_form.setSpacing(6)
-        self._lbl_position = QLabel("—")
-        self._lbl_job      = QLabel("—")
-        self._lbl_uptime   = QLabel("—")
-        self._lbl_fault    = QLabel("None")
+        self._lbl_position   = QLabel("—")
+        self._lbl_program    = QLabel("None loaded")
+        self._lbl_current_op = QLabel("—")
+        self._lbl_uptime     = QLabel("—")
+        self._lbl_fault      = QLabel("None")
         self._lbl_fault.setStyleSheet("color:green; font-weight:bold;")
         info_form.addRow("Position:", self._lbl_position)
-        info_form.addRow("Job:",      self._lbl_job)
+        info_form.addRow("Program:",  self._lbl_program)
+        info_form.addRow("Op:",       self._lbl_current_op)
         info_form.addRow("Uptime:",   self._lbl_uptime)
         info_form.addRow("Fault:",    self._lbl_fault)
         mid.addWidget(_group("Machine", info_form))
@@ -295,7 +402,8 @@ class RunTab(QWidget):
         btn_layout.setSpacing(6)
 
         self._btn_home        = _btn("Home")
-        self._btn_start       = _btn("Start Job")
+        self._btn_load        = _btn("Load Program...")
+        self._btn_start       = _btn("Run Program")
         self._btn_pause       = _btn("Pause")
         self._btn_resume      = _btn("Resume")
         self._btn_reset_fault = _btn("Reset Fault")
@@ -308,25 +416,30 @@ class RunTab(QWidget):
             (self._btn_resume, "#3498db"),
             (self._btn_estop,  "#c0392b"),
         ]:
-            b.setStyleSheet(f"background-color:{c}; color:white; font-weight:bold;")
+            b.setStyleSheet(
+                f"QPushButton {{ background-color:{c}; color:white; font-weight:bold; }}"
+                " QPushButton:disabled { background-color: #bdc3c7; color: #888; font-weight: normal; }")
 
         self._btn_estop.setMinimumHeight(50)
         f = self._btn_estop.font(); f.setPointSize(14); f.setBold(True)
         self._btn_estop.setFont(f)
 
         btn_layout.addWidget(self._btn_home,        0, 0)
-        btn_layout.addWidget(self._btn_start,       0, 1)
-        btn_layout.addWidget(self._btn_pause,       0, 2)
-        btn_layout.addWidget(self._btn_resume,      0, 3)
+        btn_layout.addWidget(self._btn_load,        0, 1)
+        btn_layout.addWidget(self._btn_start,       0, 2)
+        btn_layout.addWidget(self._btn_pause,       0, 3)
+        btn_layout.addWidget(self._btn_resume,      0, 4)
         btn_layout.addWidget(self._btn_reset_fault, 1, 0)
         btn_layout.addWidget(self._btn_reset_estop, 1, 1)
-        btn_layout.addWidget(self._btn_estop,       0, 4, 2, 1)
+        btn_layout.addWidget(self._btn_estop,       0, 5, 2, 1)
         root.addWidget(_group("Controls", btn_layout))
         root.addStretch()
 
         self._btn_home.clicked.connect(
             lambda: self.command_requested.emit({"cmd": "home"}))
-        self._btn_start.clicked.connect(self._start_job_dialog)
+        self._btn_load.clicked.connect(self._load_program_dialog)
+        self._btn_start.clicked.connect(
+            lambda: self.command_requested.emit({"cmd": "run_program"}))
         self._btn_pause.clicked.connect(
             lambda: self.command_requested.emit({"cmd": "pause"}))
         self._btn_resume.clicked.connect(
@@ -338,13 +451,20 @@ class RunTab(QWidget):
         self._btn_reset_estop.clicked.connect(
             lambda: self.command_requested.emit({"cmd": "reset_estop"}))
 
-    def _start_job_dialog(self):
-        count, ok = QInputDialog.getInt(
-            self, "Start Job",
-            "Number of pieces (0 = run until stopped):",
-            value=0, min=0, max=9999)
-        if ok:
-            self.command_requested.emit({"cmd": "start_job", "count": count})
+    def _load_program_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Job Program", "", "JSON files (*.json)")
+        if not path:
+            return
+        import json, os
+        try:
+            with open(path) as f:
+                program = json.load(f)
+        except Exception as e:
+            QMessageBox.warning(self, "Load Error", str(e))
+            return
+        self._pending_program_name = program.get("name", os.path.basename(path))
+        self.command_requested.emit({"cmd": "load_program", "program": program})
 
     def on_status(self, msg: dict):
         state = msg.get("state", "IDLE")
@@ -355,12 +475,13 @@ class RunTab(QWidget):
             f"background-color:{color}; color:white; border-radius:6px;"
             f"padding:4px; font-size:20pt; font-weight:bold;"
         )
-        pos  = msg.get("position_name") or "—"
-        jc   = msg.get("job_count", 0)
-        jt   = msg.get("job_total", 0)
-        secs = msg.get("uptime_ms", 0) // 1000
+        pos     = msg.get("position_name") or "—"
+        secs    = msg.get("uptime_ms", 0) // 1000
+        cur_op  = msg.get("current_op") or "—"
+        step    = msg.get("step_index")
         self._lbl_position.setText(pos)
-        self._lbl_job.setText(f"{jc} / {'∞' if jt == 0 else jt} pieces")
+        self._lbl_current_op.setText(
+            f"{cur_op}  (step {step})" if step is not None else cur_op)
         self._lbl_uptime.setText(
             f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}:{secs % 60:02d}")
         fault = msg.get("fault")
@@ -377,10 +498,29 @@ class RunTab(QWidget):
         self._connected = connected
         self._update_buttons()
 
+    def set_program(self, name: str) -> None:
+        """Called by MainWindow when load_program is ACKed."""
+        self._program_loaded = True
+        self._lbl_program.setText(name)
+        self._update_buttons()
+
+    def force_state(self, state: str) -> None:
+        """Immediately apply a state and update buttons/banner without
+        waiting for the next periodic status message."""
+        self._state = state
+        color = STATE_COLORS.get(state, '#95a5a6')
+        self._state_label.setText(state.replace('_', ' '))
+        self._state_label.setStyleSheet(
+            f'background-color:{color}; color:white; border-radius:6px;'
+            f'padding:4px; font-size:20pt; font-weight:bold;')
+        self._update_buttons()
+
     def _update_buttons(self):
         s, c = self._state, self._connected
         self._btn_home.setEnabled(c and s in BUTTON_STATES["home"])
-        self._btn_start.setEnabled(c and s in BUTTON_STATES["start_job"])
+        self._btn_load.setEnabled(c)
+        self._btn_start.setEnabled(
+            c and s in BUTTON_STATES["run_program"] and self._program_loaded)
         self._btn_pause.setEnabled(c and s in BUTTON_STATES["pause"])
         self._btn_resume.setEnabled(c and s in BUTTON_STATES["resume"])
         self._btn_reset_fault.setEnabled(c and s in BUTTON_STATES["reset_fault"])
@@ -467,7 +607,8 @@ class CalibrationTab(QWidget):
         act_row = QHBoxLayout()
         self._btn_go     = _btn("Go to Target", min_width=120)
         self._btn_go.setStyleSheet(
-            "background-color:#2980b9; color:white; font-weight:bold;")
+            "QPushButton { background-color:#2980b9; color:white; font-weight:bold; }"
+            " QPushButton:disabled { background-color: #bdc3c7; color: #888; font-weight: normal; }")
         btn_reset = _btn("Reset to Current", min_width=120)
         btn_reset.setToolTip("Copy current machine position into target fields")
         btn_reset.clicked.connect(self._reset_target_to_current)
@@ -702,11 +843,20 @@ class CalibrationTab(QWidget):
 
     def _update_controls(self):
         can_act = self._connected and self._state == "READY"
+        can_io  = self._connected and self._state in ("IDLE", "READY")
         self._btn_go.setEnabled(can_act)
         for btn in self._teach_btns.values():
             btn.setEnabled(can_act or
                            (self._connected and self._state == "IDLE"
                             and btn is self._btn_teach_target))
+        # Servo and output buttons only valid in IDLE / READY
+        for btn in [
+            self._btn_door_open,   self._btn_door_close,
+            self._btn_laser_press, self._btn_laser_release,
+            self._btn_pump_on,     self._btn_pump_off,
+            self._btn_valve_on,    self._btn_valve_off,
+        ]:
+            btn.setEnabled(can_io)
         if not self._connected:
             hint = "Not connected to machine."
         elif self._state == "IDLE":
@@ -808,6 +958,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Pick-and-Place Control")
         self.setMinimumSize(860, 640)
         self._worker: Optional[SerialWorker] = None
+        self._last_state: str    = ""
         self._sensor_timer = QTimer(self)
         self._sensor_timer.timeout.connect(self._poll_sensors)
         self._build_ui()
@@ -842,12 +993,14 @@ class MainWindow(QMainWindow):
 
         # Tabs
         self._tabs = QTabWidget()
-        self._run_tab = RunTab()
-        self._cal_tab = CalibrationTab()
-        self._svc_tab = ServiceTab()
-        self._tabs.addTab(self._run_tab, "Run")
-        self._tabs.addTab(self._cal_tab, "Service")
-        self._tabs.addTab(self._svc_tab, "Comms")
+        self._run_tab   = RunTab()
+        self._cal_tab   = CalibrationTab()
+        self._svc_tab   = ServiceTab()
+        self._event_log = EventLog()
+        self._tabs.addTab(self._run_tab,   "Run")
+        self._tabs.addTab(self._cal_tab,   "Service")
+        self._tabs.addTab(self._svc_tab,   "Comms")
+        self._tabs.addTab(self._event_log, "Events")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self._tabs)
 
@@ -884,10 +1037,14 @@ class MainWindow(QMainWindow):
     def _on_connection_changed(self, connected: bool):
         self._set_connected(connected)
         if connected:
+            url = self._url_edit.text().strip()
+            self._event_log.append("SYSTEM", f"Connected to {url}")
             self._send({"cmd": "query_status"})
             self._send({"cmd": "query_positions"})
             self._send({"cmd": "query_sensors"})
             self._sensor_timer.start(2000)   # poll sensors every 2 s
+        else:
+            self._event_log.append("SYSTEM", "Disconnected")
 
     def _on_error(self, msg: str):
         self._sensor_timer.stop()
@@ -916,8 +1073,35 @@ class MainWindow(QMainWindow):
 
     # ---- Sending ---------------------------------------------------------
 
+    # Commands that represent meaningful user actions worth logging
+    _LOG_CMDS = {
+        "home":         "User: Home initiated",
+        "load_program": "User: Program loaded",
+        "run_program":  "User: Program started",
+        "pause":        "User: Pause requested",
+        "resume":       "User: Resume requested",
+        "estop":        "User: E-STOP pressed",
+        "reset_fault":  "User: Fault reset",
+        "reset_estop":  "User: E-Stop reset",
+        "teach_position": None,   # built dynamically below
+        "save_position":  None,
+    }
+
     def _send(self, cmd: dict):
         if self._worker and self._worker.isRunning():
+            verb = cmd.get("cmd", "")
+            if verb in self._LOG_CMDS:
+                if verb == "teach_position":
+                    msg = f"User: Taught position '{cmd.get('name', '?')}'"
+                elif verb == "save_position":
+                    msg = f"User: Saved position '{cmd.get('name', '?')}'"
+                elif verb == "load_program":
+                    prog_name = cmd.get('program', {}).get('name', '?')
+                    msg = f"User: Loaded program '{prog_name}'"
+                else:
+                    msg = self._LOG_CMDS[verb]
+                if msg:
+                    self._event_log.append("USER", msg)
             self._worker.send(cmd)
 
     # ---- Message dispatch ------------------------------------------------
@@ -929,6 +1113,24 @@ class MainWindow(QMainWindow):
             self._run_tab.on_status(msg)
             self._cal_tab.on_status(msg)
             state = msg.get("state", "")
+            if state != self._last_state:
+                fault = msg.get("fault")
+                suffix = f" ({fault})" if fault else ""
+                self._event_log.append("STATE",
+                    f"State → {state}{suffix}")
+                self._last_state = state
+            # Surface program step updates (current_op changes)
+            # Only log steps while actively running — suppress stale
+            # messages that arrive after a stop or fault.
+            op = msg.get("current_op")
+            step = msg.get("step_index")
+            active = state in ("RUNNING", "PAUSED")
+            if active and op and op != getattr(self, '_last_op', None):
+                self._last_op = op
+                self._event_log.append("PROGRAM",
+                    f"Step {step}: {op}")
+            if not active:
+                self._last_op = None
             self._status_bar.showMessage(
                 f"State: {state}  |  seq: {msg.get('seq','—')}  |  "
                 f"uptime: {msg.get('uptime_ms', 0) // 1000}s"
@@ -944,8 +1146,20 @@ class MainWindow(QMainWindow):
             elif cmd in ("teach_position", "save_position"):
                 self._cal_tab.on_teach_ack()
             elif cmd == "move_to":
-                # Position will update via next status message
                 pass
+            elif cmd == "load_program":
+                name = getattr(self._run_tab, '_pending_program_name',
+                               'Loaded')
+                self._run_tab.set_program(name)
+            elif cmd in ("reset_fault", "reset_estop"):
+                self._last_fault = None   # allow next fault to log fresh
+            elif cmd == "run_program":
+                # Don't wait for next status broadcast — enable Pause now
+                self._run_tab.force_state("RUNNING")
+            elif cmd == "pause":
+                self._run_tab.force_state("PAUSED")
+            elif cmd == "resume":
+                self._run_tab.force_state("RUNNING")
             elif cmd in ("set_servo", "set_output"):
                 self._send({"cmd": "query_sensors"})
             self._status_bar.showMessage(
@@ -954,13 +1168,25 @@ class MainWindow(QMainWindow):
         elif msg_type == "nack":
             reason = msg.get("reason", "?")
             cmd    = msg.get("cmd", "?")
+            if cmd == "load_program":
+                detail = msg.get("detail", reason)
+                QMessageBox.warning(self, "Program Error",
+                    f"Could not load program:\n{detail}")
             self._status_bar.showMessage(
                 f"NACK  id={msg.get('id')}  cmd={cmd}  reason={reason}")
 
+        elif msg_type == "log":
+            message = msg.get("message", "")
+            self._event_log.append("PROGRAM", message)
+
         elif msg_type == "fault":
             reason = msg.get("reason", "?")
+            # Deduplicate — simulator may send the same fault more than once
+            if reason != getattr(self, '_last_fault', None):
+                self._last_fault = reason
+                self._event_log.append("FAULT", f"Machine fault: {reason}")
+                QMessageBox.warning(self, "Fault", f"Machine fault:\n{reason}")
             self._status_bar.showMessage(f"FAULT: {reason}")
-            QMessageBox.warning(self, "Fault", f"Machine fault:\n{reason}")
 
     def closeEvent(self, event):
         self._sensor_timer.stop()

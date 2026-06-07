@@ -1,0 +1,308 @@
+{
+  "version": 1,
+  "name": "Pick-and-Place Demo",
+  "description": "Full pick-and-place cycle: probe stack, pick, laser, deposit. Runs 3 cycles.",
+  "config": {
+    "probe_step_mm": 1.0,
+    "probe_max_depth_mm": 150.0,
+    "probe_threshold_mm": 5.0,
+    "default_speed_pct": 70
+  },
+  "subroutines": {
+    "pick": [
+      {
+        "op": "LOG",
+        "message": "--- PICK: probing stack height ---"
+      },
+      {
+        "op": "PROBE_Z",
+        "x": "$home_x",
+        "y": "$home_y",
+        "approach_z": 60.0,
+        "store": "stack_z"
+      },
+      {
+        "op": "LOG",
+        "message": "Stack surface at Z=$stack_z"
+      },
+      {
+        "op": "MOVE",
+        "x": "$home_x",
+        "y": "$home_y",
+        "z": "$stack_z"
+      },
+      {
+        "op": "OUTPUT",
+        "name": "pump",
+        "value": true
+      },
+      {
+        "op": "DELAY",
+        "ms": 2000
+      },
+      {
+        "op": "LOG",
+        "message": "Vacuum on \u2014 lifting sheet"
+      },
+      {
+        "op": "MOVE",
+        "x": "$home_x",
+        "y": "$home_y",
+        "z": 60.0
+      },
+      {
+        "op": "RETURN"
+      }
+    ],
+    "move_to_laser": [
+      {
+        "op": "LOG",
+        "message": "--- TRANSIT: moving to laser position ---"
+      },
+      {
+        "op": "MOVE",
+        "x": "$home_x",
+        "y": "$home_y",
+        "z": 60.0,
+        "via": [
+          {
+            "x": 75.0,
+            "y": 40.0,
+            "z": 70.0
+          }
+        ]
+      },
+      {
+        "op": "MOVE",
+        "x": 150.0,
+        "y": 80.0,
+        "z": 10.0
+      },
+      {
+        "op": "OUTPUT",
+        "name": "pump",
+        "value": false
+      },
+      {
+        "op": "DELAY",
+        "ms": 1000
+      },
+      {
+        "op": "LOG",
+        "message": "Sheet placed at laser position"
+      },
+      {
+        "op": "RETURN"
+      }
+    ],
+    "run_laser": [
+      {
+        "op": "LOG",
+        "message": "--- LASER: waiting for laser safe ---"
+      },
+      {
+        "op": "OUTPUT",
+        "name": "servo_door",
+        "value": "closed"
+      },
+      {
+        "op": "WAIT",
+        "condition": "laser_safe",
+        "timeout_ms": 30000,
+        "timeout_fault": "laser_interlock"
+      },
+      {
+        "op": "LOG",
+        "message": "Laser safe confirmed \u2014 pressing start"
+      },
+      {
+        "op": "OUTPUT",
+        "name": "servo_laser_btn",
+        "value": "press"
+      },
+      {
+        "op": "DELAY",
+        "ms": 500
+      },
+      {
+        "op": "OUTPUT",
+        "name": "servo_laser_btn",
+        "value": "release"
+      },
+      {
+        "op": "LOG",
+        "message": "Laser started \u2014 waiting for cut"
+      },
+      {
+        "op": "DELAY",
+        "ms": 5000
+      },
+      {
+        "op": "LOG",
+        "message": "Cut complete"
+      },
+      {
+        "op": "RETURN"
+      }
+    ],
+    "deposit": [
+      {
+        "op": "LOG",
+        "message": "--- DEPOSIT: moving to drop zone ---"
+      },
+      {
+        "op": "PROBE_Z",
+        "x": "$deposit_x",
+        "y": "$deposit_y",
+        "approach_z": 60.0,
+        "store": "pile_z"
+      },
+      {
+        "op": "MOVE",
+        "x": "$deposit_x",
+        "y": "$deposit_y",
+        "z": "$pile_z"
+      },
+      {
+        "op": "OUTPUT",
+        "name": "valve",
+        "value": true
+      },
+      {
+        "op": "DELAY",
+        "ms": 500
+      },
+      {
+        "op": "OUTPUT",
+        "name": "valve",
+        "value": false
+      },
+      {
+        "op": "OUTPUT",
+        "name": "servo_door",
+        "value": "open"
+      },
+      {
+        "op": "DELAY",
+        "ms": 1000
+      },
+      {
+        "op": "OUTPUT",
+        "name": "servo_door",
+        "value": "closed"
+      },
+      {
+        "op": "MOVE",
+        "x": "$deposit_x",
+        "y": "$deposit_y",
+        "z": 60.0
+      },
+      {
+        "op": "SET_VAR",
+        "name": "sheets_done",
+        "expr": "$sheets_done + 1"
+      },
+      {
+        "op": "LOG",
+        "message": "Sheet $sheets_done deposited"
+      },
+      {
+        "op": "RETURN"
+      }
+    ]
+  },
+  "program": [
+    {
+      "op": "LOG",
+      "message": "=== Pick-and-Place Demo starting ==="
+    },
+    {
+      "op": "SET_VAR",
+      "name": "home_x",
+      "value": 100.0
+    },
+    {
+      "op": "SET_VAR",
+      "name": "home_y",
+      "value": 50.0
+    },
+    {
+      "op": "SET_VAR",
+      "name": "deposit_x",
+      "value": 50.0
+    },
+    {
+      "op": "SET_VAR",
+      "name": "deposit_y",
+      "value": 200.0
+    },
+    {
+      "op": "SET_VAR",
+      "name": "sheets_done",
+      "value": 0
+    },
+    {
+      "op": "LOG",
+      "message": "Homing all axes"
+    },
+    {
+      "op": "HOME",
+      "axes": [
+        "X",
+        "Y",
+        "Z"
+      ]
+    },
+    {
+      "op": "IF",
+      "condition": "not material_present",
+      "then": [
+        {
+          "op": "FAULT",
+          "reason": "no_material_at_start"
+        }
+      ]
+    },
+    {
+      "op": "LOG",
+      "message": "Material detected \u2014 running 3 cycles"
+    },
+    {
+      "op": "LOOP_FOR",
+      "count": 3,
+      "body": [
+        {
+          "op": "LOG",
+          "message": "=== Cycle starting ==="
+        },
+        {
+          "op": "CALL",
+          "sub": "pick"
+        },
+        {
+          "op": "CALL",
+          "sub": "move_to_laser"
+        },
+        {
+          "op": "CALL",
+          "sub": "run_laser"
+        },
+        {
+          "op": "CALL",
+          "sub": "deposit"
+        },
+        {
+          "op": "LOG",
+          "message": "=== Cycle complete ==="
+        }
+      ]
+    },
+    {
+      "op": "LOG",
+      "message": "=== Job complete \u2014 $sheets_done sheets processed ==="
+    },
+    {
+      "op": "HALT"
+    }
+  ]
+}
