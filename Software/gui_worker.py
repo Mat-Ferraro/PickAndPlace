@@ -1,6 +1,11 @@
 from gui_common import *
 from gui_common import _btn, _group, _label, _style_btn
 
+import base64
+
+CHUNK_SIZE = 128   # raw bytes per chunk; fits in 256-byte line with base64 + JSON overhead
+
+
 class SerialWorker(QThread):
     message_received   = pyqtSignal(dict)
     connection_changed = pyqtSignal(bool)
@@ -45,7 +50,17 @@ class SerialWorker(QThread):
         while self._running:
             while not self._send_queue.empty():
                 try:
-                    msg  = self._send_queue.get_nowait()
+                    msg = self._send_queue.get_nowait()
+                    if msg.get("cmd") == "load_program":
+                        program = msg.pop("program", {})
+                        payload = json.dumps(program, separators=(",", ":")).encode()
+                        if len(payload) > 200:
+                            # Chunked path — synchronous inside worker thread
+                            self._run_chunked_transfer(
+                                payload, msg["id"], program.get("name", ""))
+                            continue
+                        else:
+                            msg["program"] = program   # small enough for one line
                     line = json.dumps(msg, separators=(",", ":")) + "\n"
                     self._port.write(line.encode())
                     self.raw_tx.emit(line.rstrip())
@@ -80,8 +95,76 @@ class SerialWorker(QThread):
         self._running = False
         self.connection_changed.emit(False)
 
+    # -----------------------------------------------------------------------
+    # Chunked transfer (runs synchronously inside the worker thread)
+    # -----------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Run tab
-# ---------------------------------------------------------------------------
+    def _write_raw(self, msg_dict: dict) -> None:
+        line = json.dumps(msg_dict, separators=(",", ":")) + "\n"
+        self._port.write(line.encode())
+        self.raw_tx.emit(line.rstrip())
+
+    def _read_until_ack(self, expected_cmd: str, timeout_s: float = 5.0) -> dict:
+        """Read messages until we get an ACK/NACK for expected_cmd.
+        All other messages (status broadcasts, etc.) are forwarded normally.
+        """
+        deadline = time.monotonic() + timeout_s
+        buf = b""
+        while time.monotonic() < deadline:
+            try:
+                data = self._port.read(256)
+            except Exception as exc:
+                raise RuntimeError(f"Read error during transfer: {exc}")
+            if data:
+                buf += data
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                    self.raw_rx.emit(raw.decode())
+                    if msg.get("cmd") == expected_cmd and msg.get("type") in ("ack", "nack"):
+                        return msg
+                    else:
+                        self.message_received.emit(msg)
+                except Exception:
+                    pass
+        raise TimeoutError(f"No ACK for \'{expected_cmd}\' within {timeout_s}s")
+
+    def _run_chunked_transfer(self, payload: bytes, cmd_id: int, program_name: str) -> None:
+        """Send a load_program payload as a begin/chunk.../end sequence.
+        Emits a synthetic load_program ACK or NACK at the end.
+        MainWindow sees only the final result — identical to a direct load_program ACK.
+        """
+        chunks = [payload[i:i + CHUNK_SIZE] for i in range(0, len(payload), CHUNK_SIZE)]
+        n = len(chunks)
+
+        try:
+            # Step 1: begin_transfer
+            self._write_raw({"type": "cmd", "id": cmd_id, "cmd": "begin_transfer",
+                              "name": program_name, "size": len(payload), "chunks": n})
+            ack = self._read_until_ack("begin_transfer")
+            if ack.get("type") == "nack":
+                raise RuntimeError(ack.get("reason", "begin_transfer rejected"))
+
+            # Step 2: send each chunk and wait for per-chunk ACK
+            for i, chunk_bytes in enumerate(chunks):
+                encoded = base64.b64encode(chunk_bytes).decode()
+                self._write_raw({"type": "cmd", "id": cmd_id, "cmd": "program_chunk",
+                                  "index": i, "data": encoded})
+                ack = self._read_until_ack("program_chunk")
+                if ack.get("type") == "nack":
+                    raise RuntimeError(f"chunk {i} rejected: {ack.get('reason', '?')}")
+
+            # Step 3: end_transfer — simulator responds with a load_program ACK
+            self._write_raw({"type": "cmd", "id": cmd_id, "cmd": "end_transfer"})
+            result = self._read_until_ack("load_program", timeout_s=10.0)
+
+        except Exception as exc:
+            result = {"type": "nack", "id": cmd_id, "cmd": "load_program",
+                      "reason": str(exc)}
+
+        self.message_received.emit(result)
 

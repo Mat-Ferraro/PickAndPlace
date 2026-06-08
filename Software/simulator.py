@@ -17,6 +17,7 @@ Console commands:
   help / quit
 """
 
+import base64
 import json
 import queue
 import socket
@@ -61,6 +62,9 @@ COMMAND_STATES: Dict[str, set] = {
     "set_param":      {State.IDLE, State.READY},
     "save_config":    {State.IDLE, State.READY},
     "load_config":    {State.IDLE, State.READY},
+    "begin_transfer": {State.IDLE, State.READY},
+    "program_chunk":  {State.IDLE, State.READY},
+    "end_transfer":   {State.IDLE, State.READY},
     "query_sensors":  {State.IDLE, State.READY, State.RUNNING,
                        State.PAUSED, State.FAULTED, State.ESTOPPED},
     "set_output":     {State.IDLE, State.READY},
@@ -119,6 +123,11 @@ class MachineState:
     stored_program:  Optional[dict] = None
     home_surface_z:    float = 10.0
     deposit_surface_z: float =  5.0
+    # Chunked transfer state
+    xfer_buf:      bytes = field(default_factory=bytes)
+    xfer_size:     int   = 0
+    xfer_chunks:   int   = 0
+    xfer_received: int   = 0
     params: Dict[str, Any] = field(default_factory=lambda: {
         "laser_interlock_mode":        0,
         "status_rate_hz":              5,
@@ -510,6 +519,47 @@ class StateMachine:
         if k not in self.ms.params:
             self.send({"type":"nack","id":i,"cmd":"get_param","reason":"invalid_param"}); return
         self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":self.ms.params[k]})
+
+    def _cmd_begin_transfer(self, i, m):
+        size   = int(m.get("size",   0))
+        chunks = int(m.get("chunks", 0))
+        if size <= 0 or chunks <= 0:
+            self.send({"type":"nack","id":i,"cmd":"begin_transfer","reason":"invalid_param"}); return
+        self.ms.xfer_buf = b""; self.ms.xfer_size = size
+        self.ms.xfer_chunks = chunks; self.ms.xfer_received = 0
+        self.send({"type":"ack","id":i,"cmd":"begin_transfer"})
+
+    def _cmd_program_chunk(self, i, m):
+        idx = m.get("index", -1)
+        if self.ms.xfer_size == 0:
+            self.send({"type":"nack","id":i,"cmd":"program_chunk","reason":"no_transfer_in_progress"}); return
+        if idx != self.ms.xfer_received:
+            self.send({"type":"nack","id":i,"cmd":"program_chunk",
+                       "reason":f"out_of_order_expected_{self.ms.xfer_received}"}); return
+        try:
+            self.ms.xfer_buf += base64.b64decode(m.get("data",""))
+        except Exception:
+            self.send({"type":"nack","id":i,"cmd":"program_chunk","reason":"bad_base64"}); return
+        self.ms.xfer_received += 1
+        self.send({"type":"ack","id":i,"cmd":"program_chunk","index":idx})
+
+    def _cmd_end_transfer(self, i, m):
+        if self.ms.xfer_size == 0:
+            self.send({"type":"nack","id":i,"cmd":"end_transfer","reason":"no_transfer_in_progress"}); return
+        if self.ms.xfer_received != self.ms.xfer_chunks:
+            reason = f"incomplete_{self.ms.xfer_received}_of_{self.ms.xfer_chunks}"
+            self.send({"type":"nack","id":i,"cmd":"end_transfer","reason":reason})
+            self.ms.xfer_buf = b""; self.ms.xfer_size = 0; return
+        if len(self.ms.xfer_buf) != self.ms.xfer_size:
+            self.send({"type":"nack","id":i,"cmd":"end_transfer","reason":"size_mismatch"})
+            self.ms.xfer_buf = b""; self.ms.xfer_size = 0; return
+        try:
+            program = json.loads(self.ms.xfer_buf.decode())
+        except json.JSONDecodeError as e:
+            self.send({"type":"nack","id":i,"cmd":"end_transfer","reason":f"json_error:{e}"})
+            self.ms.xfer_buf = b""; self.ms.xfer_size = 0; return
+        self.ms.xfer_buf = b""; self.ms.xfer_size = 0
+        self._cmd_load_program(i, {"cmd":"load_program","program":program})
 
     def _cmd_save_config(self, i, m):
         _save_positions(self.ms.taught)
