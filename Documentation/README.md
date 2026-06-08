@@ -49,6 +49,15 @@ python pnp_gui.py
 
 The GUI connects to `socket://localhost:9999/` by default. Hit **Connect**.
 
+**Run the unit tests:**
+```
+cd Software
+pytest
+```
+No hardware, GUI, or PyQt6/pyserial install is required — the tests stub those
+layers. They cover the interpreter, the simulator state machine and protocol,
+and the serial-worker framing.
+
 **Run the demo:**
 1. Click **Home** on the Run tab — wait for READY (~3 s)
 2. Click **Load Program...** — select `demo_program.json`
@@ -92,13 +101,15 @@ The GUI connects to `socket://localhost:9999/` by default. Hit **Connect**.
 **Simulator and GUI: functional for development**
 
 - Full protocol implemented: connect, home, load program, run, pause/resume, e-stop, fault injection.
-- Program interpreter executing all instruction types: MOVE, PROBE_Z, HOME, OUTPUT, WAIT, DELAY, LOOP_FOR, LOOP_WHILE, IF, CALL/RETURN, SET_VAR, LOG, HALT, FAULT.
+- Chunked `load_program` transfer (`begin_transfer` / `program_chunk` / `end_transfer`) for programs over 200 bytes; see `communication-protocol.md` §4.3.
+- Program interpreter executing all instruction types: MOVE, PROBE_Z, HOME, OUTPUT, READ_SENSOR, WAIT, DELAY, LOOP_FOR, LOOP_WHILE, IF, CALL/RETURN, SET_VAR, LOG, HALT, FAULT. (`JUMP`/`LABEL` are reserved, not yet implemented.)
+- Program editor (Program tab): waypoint-based editing, local validation, upload, and retrieval of the stored program.
 - Demo program runs 3 full pick-and-place cycles (~6 minutes) with realistic timing.
 - Events tab logs all user actions, program steps, state transitions, and faults with save/export.
+- Unit test suite (`Software/tests/`, pytest) covering the interpreter, simulator state machine / protocol / chunked transfer, and serial-worker framing.
 
 **Not yet implemented in simulator:**
-- Program editor tab (write programs within the GUI).
-- Chunked `load_program` transfer (large programs sent in one TCP line; real firmware needs chunking).
+- Continuous safety monitors — laser-park interlock (`laser_not_parked`) and pickup-loss detection (`pickup_lost`), documented in `architecture.md` §11. Required in firmware before hardware bring-up.
 
 **Not yet validated on hardware:**
 - Stepper motion through RAMPS + TMC2209.

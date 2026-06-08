@@ -251,26 +251,6 @@ Persistent config should include a schema/version byte, CRC/checksum, factory
 defaults, explicit save/load commands, invalid-config behavior, and EEPROM wear
 protection. Do not auto-save every loop or on every streamed GUI edit.
 
-## 15. Software development stack
-
-Three Python files form the development stack that allows GUI development and
-end-to-end testing before any hardware is available.
-
-```
-pnp_gui.py          Windows operator interface
-    │  JSON over TCP (socket://localhost:9999/)
-simulator.py        Fake Arduino — speaks the protocol, enforces state machine
-    │  calls
-interpreter.py      Program execution engine — runs job JSON programs
-    │  implements
-MachineInterface    Abstract hardware layer (SimulatedMachine in simulator;
-                    real drivers in firmware)
-```
-
-`interpreter.py` is the reference implementation of the program executor.
-The C++ firmware port must match its behaviour exactly. Programs authored in
-the GUI and validated by the Python interpreter will run unchanged on the Mega.
-
 ## 13. System diagram
 
 
@@ -294,11 +274,14 @@ RAMPS 1.4
 
 The GUI (`pnp_gui.py`) is a setup, command, monitoring, and service interface
 implemented in PyQt6. It connects to either the Python simulator over TCP
-(`socket://localhost:9999/`) or the Mega over a USB COM port. Four tabs:
+(`socket://localhost:9999/`) or the Mega over a USB COM port. Five tabs:
 
 - **Run:** state banner, sensor indicators (pickup, material, laser safe, e-stop),
   program name and current instruction, Load Program / Run Program / Pause / Resume
   / E-Stop / Reset controls with correct enable/disable per state.
+- **Program:** waypoint-based job-program editor — build MOVE / PROBE_Z sequences
+  from a table, validate locally, upload to the machine, and retrieve the stored
+  program.
 - **Service:** target position inc/dec controls (X/Y/Z), named positions table with
   Teach Current / Teach Target actions, servo and output test controls with
   state-aware button colours, raw input indicators.
@@ -306,8 +289,28 @@ implemented in PyQt6. It connects to either the Python simulator over TCP
 - **Events:** timestamped log of user actions, program steps, state transitions, and
   faults; filterable by category; saveable as .txt or .csv.
 
-A **program editor tab** is planned: write/edit job programs in JSON within the GUI,
-validate locally, upload to the machine, and retrieve the stored program.
-
 The GUI is built against the protocol in `communication-protocol.md`. The simulator
 allows full GUI development and testing without hardware.
+
+## 15. Software development stack
+
+Three Python files form the development stack that allows GUI development and
+end-to-end testing before any hardware is available.
+
+```
+pnp_gui.py          Windows operator interface
+    │  JSON over TCP (socket://localhost:9999/)
+simulator.py        Fake Arduino — speaks the protocol, enforces state machine
+    │  calls
+interpreter.py      Program execution engine — runs job JSON programs
+    │  implements
+MachineInterface    Abstract hardware layer (SimulatedMachine in simulator;
+                    real drivers in firmware)
+```
+
+`interpreter.py` is the reference implementation of the program executor.
+The C++ firmware port must match its behaviour exactly. Programs authored in
+the GUI and validated by the Python interpreter will run unchanged on the Mega.
+The Python test suite under `Software/tests/` exercises the interpreter,
+simulator, and serial-worker layers and serves as a behavioural checklist for
+the C++ port.

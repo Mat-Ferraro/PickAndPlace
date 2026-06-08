@@ -18,7 +18,7 @@ later.
 - **Encoding:** JSON, one message per line (newline-delimited / NDJSON).
 - **Line ending:** firmware accepts `\n` and must tolerate `\r\n`.
 - **Maximum line length:** 256 bytes for standard messages. `load_program`
-  payloads are chunked — see §4.3.
+  payloads larger than 200 bytes are sent via chunked transfer — see §4.3.
 - **Character set:** ASCII / UTF-8 JSON. No binary payloads.
 - **Parser rule:** no unbounded strings, no deeply nested objects, no dynamic
   allocation in the main control loop.
@@ -150,39 +150,65 @@ message.
 ### 4.3 Program loading (`load_program`)
 
 The `program` field carries the full job program object as defined in
-`job-program.md`. Because programs may exceed the 256-byte line limit, the GUI
-must chunk large programs and send them in a multi-part sequence:
+`job-program.md`. A serialized program of **200 bytes or less** is sent in a
+single `load_program` command. Anything larger must use the chunked transfer
+sequence below, because standard lines are capped at 256 bytes (§1).
 
-**Single-part (small programs ≤ 200 bytes serialized):**
+**Single-part (serialized program ≤ 200 bytes):**
 ```json
 {"type": "cmd", "id": 4, "cmd": "load_program", "program": { ... }}
 ```
 
-**Multi-part (chunked transfer):**
+**Chunked transfer (serialized program > 200 bytes):**
+
+Chunking uses three dedicated commands rather than repeated `load_program`
+messages. The raw program JSON is split into fragments of at most 128 bytes,
+each base64-encoded for transport.
+
+| Command | Fields | Description |
+|---|---|---|
+| `begin_transfer` | `name` *(str)*, `size` *(int)*, `chunks` *(int)* | Start a transfer. `size` is the raw payload length in bytes; `chunks` is the number of fragments to expect. Resets any in-progress transfer. |
+| `program_chunk` | `index` *(int)*, `data` *(str)* | One base64-encoded fragment. `index` must equal the number of chunks already accepted (strictly in order, 0-based). ACK echoes the accepted `index`. |
+| `end_transfer` | — | Finalize. Firmware concatenates the fragments, base64-decodes, checks the assembled length against `size`, then parses and validates the program. |
+
 ```json
-{"type": "cmd", "id": 4, "cmd": "load_program", "chunk": 0, "total_chunks": 3, "data": "<base64 fragment>"}
-{"type": "cmd", "id": 5, "cmd": "load_program", "chunk": 1, "total_chunks": 3, "data": "<base64 fragment>"}
-{"type": "cmd", "id": 6, "cmd": "load_program", "chunk": 2, "total_chunks": 3, "data": "<base64 fragment>"}
+{"type": "cmd", "id": 4, "cmd": "begin_transfer", "name": "demo", "size": 1180, "chunks": 10}
+{"type": "cmd", "id": 4, "cmd": "program_chunk", "index": 0, "data": "<base64 fragment>"}
+{"type": "cmd", "id": 4, "cmd": "program_chunk", "index": 1, "data": "<base64 fragment>"}
+{"type": "cmd", "id": 4, "cmd": "end_transfer"}
 ```
 
-Firmware assembles chunks, validates the complete program, then ACKs or NACKs.
-An interrupted chunk sequence times out after 5 seconds and is discarded.
+`begin_transfer` and each `program_chunk` receive their own ACK/NACK. The final
+result of the whole transfer is delivered as a single **`load_program`**
+ACK/NACK in response to `end_transfer` (not an `end_transfer` ACK), so a client
+sees the same completion message it would get from a single-part load.
 
-**Successful ACK:**
+**Successful ACK (in response to `end_transfer`):**
 ```json
-{"type": "ack", "id": 6, "cmd": "load_program", "instructions": 24, "bytes": 1180}
+{"type": "ack", "id": 4, "cmd": "load_program", "instructions": 24, "bytes": 1180}
 ```
 
 **Validation NACK:**
 ```json
 {
   "type":   "nack",
-  "id":     6,
+  "id":     4,
   "cmd":    "load_program",
   "reason": "invalid_param",
-  "detail": "Instruction 7: PROBE_Z missing required field 'store'"
+  "detail": "instruction 7: PROBE_Z missing required field 'store'"
 }
 ```
+
+**Transfer-specific NACK reasons** (see also §6.1): `no_transfer_in_progress`,
+`out_of_order_expected_N`, `bad_base64`, `incomplete_R_of_C`, `size_mismatch`,
+and `json_error:<detail>`.
+
+> **Firmware note:** real firmware should discard a partially received transfer
+> if no further `program_chunk`/`end_transfer` arrives within a few seconds, to
+> avoid a wedged transfer buffer. The current simulator does not time a partial
+> transfer out — it retains the buffer until the next `begin_transfer` replaces
+> it. The simulator also tolerates a complete single-line `load_program` up to
+> 64 KB as a development convenience; firmware relies on chunking above 200 bytes.
 
 ### 4.4 Configuration
 
@@ -243,12 +269,16 @@ Full parameter key list to be defined when the persistent-config schema is locke
 
 ## 5. State × command matrix
 
-✓ = accepted. — = NACKed `not_ready`. ★ = accepted in all states.
+✓ = accepted. — = rejected (NACK `not_ready` in most states; `hw_fault` in
+FAULTED, `estop_active` in ESTOPPED — see §6.1). ★ = accepted in all states.
 
 | Command | IDLE | HOMING | READY | RUNNING | PAUSED | FAULTED | ESTOPPED |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | `home` | ✓ | — | ✓ | — | — | — | — |
 | `load_program` | ✓ | — | ✓ | — | — | — | — |
+| `begin_transfer` | ✓ | — | ✓ | — | — | — | — |
+| `program_chunk` | ✓ | — | ✓ | — | — | — | — |
+| `end_transfer` | ✓ | — | ✓ | — | — | — | — |
 | `get_program` | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
 | `run_program` | — | — | ✓ | — | — | — | — |
 | `pause` | — | — | — | ✓ | — | — | — |
@@ -282,13 +312,19 @@ Full parameter key list to be defined when the persistent-config schema is locke
 |---|---|
 | `not_ready` | Command is valid but illegal in the current state. |
 | `unknown_cmd` | `cmd` field not recognized. |
-| `malformed` | JSON failed to parse, or a required field is missing or wrong type. |
-| `oversized` | Line exceeded the 256-byte limit. |
+| `malformed` | JSON failed to parse, or the `cmd` field is missing. (Missing or wrong-type command parameters are reported per-command as `invalid_param`.) |
+| `oversized` | Line exceeded the 256-byte limit (a single-line `load_program` may exceed this up to 64 KB; see §4.3). |
 | `missing_id` | No `id` field. NACK sent with `"id": null`. |
 | `invalid_param` | Key unknown, value out of range/wrong type, or program validation failure. |
-| `estop_active` | Command requires motion but e-stop is active. |
-| `hw_fault` | A hardware condition prevents the command. |
-| `no_program` | `run_program` issued but no valid program is stored in EEPROM. |
+| `estop_active` | Command rejected because e-stop is active (`ESTOPPED`). |
+| `hw_fault` | Command rejected because the machine is `FAULTED`, or `reset_estop` issued while the hardware e-stop is still held. |
+| `no_program` | `run_program` issued but no valid program is stored. |
+| `no_transfer_in_progress` | `program_chunk`/`end_transfer` received with no active transfer (§4.3). |
+| `out_of_order_expected_N` | A `program_chunk` arrived with an unexpected `index`; N is the next expected index. |
+| `bad_base64` | A `program_chunk` `data` field failed base64 decoding. |
+| `incomplete_R_of_C` | `end_transfer` with fewer chunks received (R) than declared (C). |
+| `size_mismatch` | Assembled transfer payload length did not match the declared `size`. |
+| `json_error:<detail>` | Assembled transfer payload was not valid JSON. |
 
 ### 6.2 Fault reason codes
 

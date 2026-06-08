@@ -5,6 +5,11 @@ import base64
 
 CHUNK_SIZE = 128   # raw bytes per chunk; fits in 256-byte line with base64 + JSON overhead
 
+# A load_program whose compact-JSON payload exceeds this many bytes is sent via
+# the begin/chunk/end transfer sequence instead of a single line. Kept below the
+# 256-byte read window so a direct load_program always fits in one framed line.
+MAX_DIRECT_PAYLOAD_BYTES = 200
+
 
 class SerialWorker(QThread):
     message_received   = pyqtSignal(dict)
@@ -54,7 +59,7 @@ class SerialWorker(QThread):
                     if msg.get("cmd") == "load_program":
                         program = msg.pop("program", {})
                         payload = json.dumps(program, separators=(",", ":")).encode()
-                        if len(payload) > 200:
+                        if self._should_chunk(payload):
                             # Chunked path — synchronous inside worker thread
                             self._run_chunked_transfer(
                                 payload, msg["id"], program.get("name", ""))
@@ -98,6 +103,11 @@ class SerialWorker(QThread):
     # -----------------------------------------------------------------------
     # Chunked transfer (runs synchronously inside the worker thread)
     # -----------------------------------------------------------------------
+
+    def _should_chunk(self, payload: bytes) -> bool:
+        """True if a load_program payload is too large to send on a single line
+        and must use the begin/chunk/end transfer sequence instead."""
+        return len(payload) > MAX_DIRECT_PAYLOAD_BYTES
 
     def _write_raw(self, msg_dict: dict) -> None:
         line = json.dumps(msg_dict, separators=(",", ":")) + "\n"
@@ -167,4 +177,3 @@ class SerialWorker(QThread):
                       "reason": str(exc)}
 
         self.message_received.emit(result)
-

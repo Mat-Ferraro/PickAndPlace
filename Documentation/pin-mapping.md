@@ -57,8 +57,8 @@ dual-Y independent squaring is required.
 |---|---:|---|---|
 | SERVO0 | D11 | ✓ | Spare |
 | SERVO1 | D6  | ✓ | Spare |
-| SERVO2 | D5  | ✓ | **Door servo** — opens gate so cut paper falls through during `DEPOSITING` |
-| SERVO3 | D4  | ✓ | **Laser button servo** — presses laser cutter start button at end of `PLACING` |
+| SERVO2 | D5  | ✓ | **Door servo** — opens the gate so cut paper falls through during the deposit sequence (`servo_door` output) |
+| SERVO3 | D4  | ✓ | **Laser button servo** — presses the laser cutter start button during the laser sequence (`servo_laser_btn` output) |
 
 All four are PWM-capable [ref: Mega pinout]. Servo power (red/ground wires) comes
 from an external regulated 5 V supply — not the RAMPS 5 V rail. The external 5 V

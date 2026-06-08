@@ -9,9 +9,11 @@ The instruction set is intentionally machine-agnostic at the language level.
 Pick-and-place semantics (probe the stack, pick, place, deposit) are expressed
 as sequences of primitives rather than hardcoded states.
 
-> **Status:** v0.1 — instruction set and program format are defined. Binary
-> EEPROM encoding and the firmware interpreter are deferred to the firmware
-> implementation phase. The Python simulator works directly from JSON.
+> **Status:** v0.9 (program format version 1). Instruction set and program
+> format are defined and implemented in the Python interpreter (`interpreter.py`),
+> the reference for the C++ port. Binary EEPROM encoding is deferred to the
+> firmware phase; the simulator works directly from JSON. `JUMP`/`LABEL` are
+> reserved but not yet implemented in the interpreter — see §3.4.
 
 ---
 
@@ -244,6 +246,7 @@ Read a named sensor value into a variable.
 | `material_present` | bool | Aggregate material detection (TOF-6 < threshold). |
 | `pickup_ok` | bool | Aggregate pickup confirmation. |
 | `laser_safe` | bool | Current interlock result. |
+| `estop_hw` | bool | Hardware e-stop input state. |
 
 ---
 
@@ -374,17 +377,21 @@ execution cleanly (equivalent to `HALT`).
 
 ---
 
-#### `JUMP` / `LABEL`
+#### `JUMP` / `LABEL` *(reserved — not implemented in v1)*
 
-Unconditional jump to a label. Primarily for simple loops without a nesting
-structure. Prefer `LOOP_WHILE` when possible.
+Reserved for a future unconditional jump to a label. **The current interpreter
+(v1) does not implement them:** `LABEL` is parsed but treated as a no-op, and
+`JUMP` raises a `program_error` fault at runtime. Both pass load-time validation
+but `JUMP` will fault on execution, so do not use them yet — express loops with
+`LOOP_WHILE` and reusable sequences with `CALL`/`RETURN`.
 
 ```json
 {"op": "LABEL", "name": "top_of_loop"}
 {"op": "JUMP",  "to":   "top_of_loop"}
 ```
 
-JUMP is subject to the same 10,000-execution safety limit as `LOOP_WHILE`.
+When implemented, `JUMP` will be subject to the same 10,000-execution safety
+limit as `LOOP_WHILE`.
 
 ---
 
@@ -512,9 +519,10 @@ On failure (validation error):
    readings. This is a firmware hard limit, not a configurable value.
 3. `MOVE` enforces configured travel limits. Instructions that command motion
    outside limits are faulted at runtime, not at load time.
-4. `LOOP_WHILE` and `JUMP` are limited to 10,000 total iterations per program
-   run to prevent unrecoverable infinite loops. The limit resets on each
-   `run_program`.
+4. Each `LOOP_WHILE` invocation is limited to 10,000 iterations to prevent
+   unrecoverable infinite loops; exceeding it faults with `loop_overflow`.
+   (`JUMP` will share this limit once implemented; it is reserved in v1 —
+   see §3.4.)
 5. Subroutine depth is limited to 8. Exceeding this faults immediately.
 6. A `FAULT` instruction is always honoured; no instruction can suppress it.
 7. Programs are validated at load time (field presence, type checks, known op

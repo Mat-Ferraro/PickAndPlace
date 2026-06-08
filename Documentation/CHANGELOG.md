@@ -1,4 +1,26 @@
 
+## v0.9.1
+
+- **Program editor tab implemented.** New "Program" tab in `pnp_gui.py`
+  (`tab_program.py`): waypoint-based editing that generates MOVE / PROBE_Z
+  sequences from a table, with local validation, upload, and retrieval of the
+  stored program. Previously listed as planned.
+- **Chunked `load_program` transfer implemented.** GUI and simulator now support
+  the `begin_transfer` / `program_chunk` / `end_transfer` sequence for programs
+  over 200 bytes (`gui_worker.py`, `simulator.py`). `communication-protocol.md`
+  §4.3 rewritten to document the as-built wire format and its NACK reasons.
+- **`gui_worker.py`:** extracted the chunk-vs-direct decision into
+  `_should_chunk()` with a named `MAX_DIRECT_PAYLOAD_BYTES = 200` constant.
+- **Unit test suite added** under `Software/tests/` (pytest): coverage for the
+  interpreter, the simulator state machine / protocol / chunked transfer, and the
+  serial-worker framing logic. Runs without hardware or PyQt6/pyserial.
+- **Documentation consistency pass.** Corrected the §4.3 chunk format and reason
+  codes in `communication-protocol.md`; marked `JUMP`/`LABEL` as reserved / not
+  yet implemented in `job-program.md` and fixed the loop-limit wording; updated
+  stale "not implemented" status in `README.md`; updated the GUI tab list and
+  fixed section ordering in `architecture.md`; replaced retired-state references
+  (`DEPOSITING` / `PLACING`) in `pin-mapping.md`.
+
 ## v0.9
 
 - **Major software development phase — GUI, simulator, interpreter.**

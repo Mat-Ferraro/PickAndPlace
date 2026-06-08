@@ -80,6 +80,12 @@ Live questions that are not yet settled. Move an item into the relevant doc
   endstops. The current suggested Start/Pause/E-stop use endstop headers, which may
   conflict with axis limits unless additional headers or an I/O expansion plan is
   chosen.
+- **Laser fault naming.** `communication-protocol.md` §6.2 lists both
+  `laser_interlock` (interlock not met) and `laser_not_parked` (arm moved while
+  the head is unparked), and `architecture.md` §11 uses `laser_not_parked`, but
+  the simulator's injectable fault set currently only has `laser_interlock`.
+  Settle one canonical reason per condition before the firmware implements the
+  continuous laser-park monitor.
 
 ## Protocol
 
@@ -87,10 +93,13 @@ Live questions that are not yet settled. Move an item into the relevant doc
 - ~~Program editor tab~~ **Resolved.** Waypoint-based editor implemented.
   Generates MOVE / PROBE_Z sequences from a table. Load, save, validate, upload.
 
-- **Chunked `load_program` transfer.** The GUI currently sends the entire
-  program JSON in a single TCP line (limit raised to 64 KB in simulator).
-  Real Mega firmware needs proper chunked transfer as defined in
-  `communication-protocol.md` §4.3. Implement before hardware bring-up.
+- ~~**Chunked `load_program` transfer.**~~ **Resolved for GUI + simulator.**
+  The GUI chunks programs over 200 bytes using the `begin_transfer` /
+  `program_chunk` / `end_transfer` sequence (`communication-protocol.md` §4.3),
+  and the simulator implements the receiving side. Two follow-ups remain for
+  hardware: the C++ firmware must implement the same sequence, and a
+  partial-transfer timeout is still needed (the simulator does not yet discard
+  an abandoned transfer — it holds the buffer until the next `begin_transfer`).
 
 - **Multi-sheet odd-batch limitation.** If a loop iteration picks up more than
   one sheet and the total batch count is odd, the final pickup attempt on the last
