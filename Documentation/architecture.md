@@ -34,9 +34,9 @@ from a GPIO, the 5 V pin, the 3.3 V pin, VIN, or USB.
 | Z | 1 | Single stepper |
 | **Total** | **4** | Fits RAMPS X/Y/Z/E0 sockets |
 
-The motor count and the pin tables assume a **Cartesian gantry**. If the machine is
-actually an articulated/SCARA arm, this section and the jog/teach interface change
-substantially — see `open-decisions.md`.
+The machine is a **Cartesian gantry** (X / dual-Y / Z) — confirmed, not an
+articulated/SCARA arm. The motor count, pin tables, homing, and jog/teach interface
+all assume this geometry.
 
 Candidate motor: 42BYGHW811 NEMA 17, 4-wire bipolar, 1.8°/step (200 steps/rev),
 ~2.5 A/phase. Because this is a relatively high-current NEMA 17, the StepStick

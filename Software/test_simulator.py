@@ -522,6 +522,145 @@ class TestInternalEvents:
 
 
 # ===========================================================================
+# Headless physical-button emulation (GUI-attached status propagation)
+# ===========================================================================
+
+class TestPhysicalButtons:
+    """A physical button drives the same transition as the GUI command, but
+    sends NO ack — an attached GUI learns of the change from the next status
+    broadcast. These tests assert the transition happens AND no ack is emitted."""
+
+    def _press(self, sm, button):
+        sm.enqueue_button(button)
+        sm.tick()
+        return drain(sm)
+
+    def test_start_in_idle_homes(self, sm):
+        msgs = self._press(sm, "start")
+        assert sm.ms.state == State.HOMING
+        # No command ack/nack — the GUI didn't send anything.
+        assert all(m["type"] not in ("ack", "nack") for m in msgs)
+
+    def test_start_in_ready_with_program_runs(self, sm):
+        sm.ms.stored_program = {"version": 1,
+                                "program": [{"op": "DELAY", "ms": 150},
+                                            {"op": "HALT"}]}
+        sm.ms.set_state(State.READY)
+        msgs = self._press(sm, "start")
+        assert sm.ms.state == State.RUNNING
+        assert all(m["type"] not in ("ack", "nack") for m in msgs)
+        sm._interp_thread.join(timeout=2.0)
+        sm.tick()
+        assert sm.ms.state == State.READY
+
+    def test_start_in_ready_without_program_is_refused(self, sm):
+        sm.ms.set_state(State.READY)
+        self._press(sm, "start")
+        assert sm.ms.state == State.READY   # no program -> no transition
+
+    def test_start_in_paused_resumes(self, sm):
+        sm.ms.set_state(State.PAUSED)
+        sm._pause_event.set()
+        self._press(sm, "start")
+        assert sm.ms.state == State.RUNNING
+        assert not sm._pause_event.is_set()
+
+    def test_pause_in_running_pauses(self, sm):
+        sm.ms.set_state(State.RUNNING)
+        self._press(sm, "pause")
+        assert sm.ms.state == State.PAUSED
+        assert sm._pause_event.is_set()
+
+    def test_pause_in_faulted_clears_fault(self, sm):
+        sm.ms.set_state(State.FAULTED)
+        sm.ms.fault = "motion_fault"
+        sm._stop_event.set()
+        self._press(sm, "pause")
+        assert sm.ms.state == State.IDLE
+        assert sm.ms.fault is None
+        assert not sm._stop_event.is_set()
+
+    def test_button_is_noop_in_inapplicable_state(self, sm):
+        sm.ms.set_state(State.HOMING)
+        self._press(sm, "start")
+        self._press(sm, "pause")
+        assert sm.ms.state == State.HOMING
+
+    def test_button_change_appears_in_next_status_broadcast(self, sm):
+        # The mechanism the GUI relies on: state set by a button shows up in
+        # the broadcast status payload.
+        self._press(sm, "start")
+        status = sm._build_status()
+        assert status["state"] == "HOMING"
+
+
+# ===========================================================================
+# Fault / error injection for GUI testing
+# ===========================================================================
+
+class TestFaultInjection:
+
+    def test_jam_raises_motion_fault_with_axis(self, sm):
+        sm.enqueue_jam("Y2")
+        sm.tick()
+        msgs = drain(sm)
+        assert sm.ms.state == State.FAULTED
+        assert sm.ms.fault == "motion_fault"
+        fault_msg = only(msgs, None)
+        assert fault_msg["type"] == "fault"
+        assert fault_msg["reason"] == "motion_fault" and fault_msg["axis"] == "Y2"
+
+    def test_jam_during_run_keeps_motion_fault_reason(self, sm):
+        sm.ms.stored_program = {"version": 1,
+                                "program": [{"op": "DELAY", "ms": 300},
+                                            {"op": "HALT"}]}
+        sm.ms.set_state(State.READY)
+        sm.enqueue_button("start"); sm.tick()
+        assert sm.ms.state == State.RUNNING
+        sm.enqueue_jam("X"); sm.tick()
+        assert sm.ms.state == State.FAULTED and sm.ms.fault == "motion_fault"
+        # The aborting interpreter must not overwrite motion_fault with estop_triggered.
+        sm._interp_thread.join(timeout=2.0)
+        sm.tick()
+        assert sm.ms.fault == "motion_fault"
+
+    def test_reset_fault_rearms_stop_event(self, sm):
+        sm.enqueue_jam("X"); sm.tick()
+        drain(sm)
+        sm.ms.set_state(State.FAULTED)   # ensure FAULTED for the command gate
+        resp = only(step(sm, {"id": 1, "cmd": "reset_fault"}))
+        assert resp["type"] == "ack"
+        assert sm.ms.state == State.IDLE and not sm._stop_event.is_set()
+
+    def test_estop_release_returns_to_idle(self, sm):
+        sm.enqueue_estop(released=False); sm.tick()
+        assert sm.ms.state == State.ESTOPPED
+        sm.enqueue_estop(released=True); sm.tick()
+        assert sm.ms.state == State.IDLE
+        assert sm.ms.estop_hw is False and not sm._stop_event.is_set()
+
+    def test_all_documented_faults_are_injectable(self, sm):
+        for reason in simulator.VALID_FAULTS_SET:
+            m = StateMachine()
+            m.enqueue_fault(reason); m.tick()
+            assert m.ms.state == State.FAULTED and m.ms.fault == reason
+
+
+# ===========================================================================
+# program_loaded status field
+# ===========================================================================
+
+class TestProgramLoadedStatus:
+
+    def test_false_when_no_program(self, sm):
+        assert sm._build_status()["program_loaded"] is False
+
+    def test_true_after_program_stored(self, sm):
+        sm.ms.stored_program = {"version": 1, "program": [{"op": "HALT"}]}
+        assert sm._build_status()["program_loaded"] is True
+
+
+# ===========================================================================
 # SimulatedMachine — interpreter-facing backend
 # ===========================================================================
 

@@ -306,6 +306,8 @@ class StateMachine:
     def enqueue_estop(self, released): self.cmd_queue.put({"_internal":"estop_hw","released":released})
     def enqueue_laser_state(self, home): self.cmd_queue.put({"_internal":"laser_state","home":home})
     def enqueue_material_state(self, present): self.cmd_queue.put({"_internal":"material_state","present":present})
+    def enqueue_button(self, button): self.cmd_queue.put({"_internal":"button","button":button})
+    def enqueue_jam(self, axis): self.cmd_queue.put({"_internal":"jam","axis":axis})
     def send(self, msg): self.out_queue.put(json.dumps(msg))
     def build_status(self):
         with self._lock: return self._build_status()
@@ -339,8 +341,9 @@ class StateMachine:
             if self.ms.state == State.RUNNING:
                 self.ms.set_state(State.READY)
         else:
-            # Don't overwrite ESTOPPED with FAULTED — E-stop takes priority
-            if self.ms.state != State.ESTOPPED:
+            # Don't overwrite an already-terminal fault state — E-stop or a
+            # motion_fault (jam) that aborted the run keeps its own reason.
+            if self.ms.state not in (State.ESTOPPED, State.FAULTED):
                 self.ms.fault = data
                 self.ms.set_state(State.FAULTED)
                 self.send({"type": "fault", "reason": data})
@@ -370,6 +373,12 @@ class StateMachine:
         elif kind == "estop_hw":
             if msg["released"]:
                 ms.estop_hw = False
+                # Releasing the latched E-stop returns the machine to IDLE
+                # (not READY — position trust is lost, so a re-home is needed).
+                if ms.state == State.ESTOPPED:
+                    self._stop_event.clear()
+                    ms.fault = None
+                    ms.set_state(State.IDLE)
             else:
                 ms.estop_hw = True
                 self._stop_event.set()
@@ -382,6 +391,41 @@ class StateMachine:
         elif kind == "material_state":
             ms.tof_dist_mm[5] = 25 if msg["present"] else 300
             ms.tof_valid[5]   = True
+        elif kind == "jam":
+            # StallGuard-style stall/jam: abort any motion, raise motion_fault.
+            if ms.state != State.ESTOPPED:
+                self._stop_event.set()
+                ms.fault = "motion_fault"
+                ms.set_state(State.FAULTED)
+                self.send({"type":"fault","reason":"motion_fault","axis":msg.get("axis")})
+        elif kind == "button":
+            self._handle_button(msg["button"])
+
+    def _handle_button(self, button):
+        """Emulate a physical button press. Drives the same state transition the
+        firmware's button handler would, but sends NO command ack — an attached
+        GUI learns of the change from the next status broadcast, exactly as with
+        real hardware. See architecture.md §9.1 for the button map."""
+        ms, s = self.ms, self.ms.state
+        if button == "start":            # "proceed"
+            if s == State.IDLE:
+                ms.set_state(State.HOMING)
+                self._homing_done_at = time.monotonic() + 3.0
+            elif s == State.READY:
+                if ms.stored_program is not None:   # else refused (would beep)
+                    self._start_interpreter()
+                    ms.set_state(State.RUNNING)
+            elif s == State.PAUSED:
+                self._pause_event.clear()
+                ms.set_state(State.RUNNING)
+        elif button == "pause":          # "halt / dismiss"
+            if s == State.RUNNING:
+                self._pause_event.set()
+                ms.set_state(State.PAUSED)
+            elif s == State.FAULTED:
+                self._stop_event.clear()
+                ms.fault = None
+                ms.set_state(State.IDLE)
 
     def _handle_command(self, msg):
         ms = self.ms
@@ -456,6 +500,7 @@ class StateMachine:
         self.send({"type":"fault","reason":"estop_triggered"})
 
     def _cmd_reset_fault(self, i, m):
+        self._stop_event.clear()
         self.ms.fault = None
         self.ms.set_state(State.IDLE)
         self.send({"type":"ack","id":i,"cmd":"reset_fault"})
@@ -631,7 +676,8 @@ class StateMachine:
             "state": ms.state.value, "position_name": ms.resolve_position_name(),
             "x_mm": round(ms.x_mm,2), "y_mm": round(ms.y_mm,2), "z_mm": round(ms.z_mm,2),
             "pickup_ok": ms.pickup_ok, "material_present": ms.material_present,
-            "laser_safe": ms.laser_safe, "estop_hw": ms.estop_hw, "fault": ms.fault,
+            "laser_safe": ms.laser_safe, "estop_hw": ms.estop_hw,
+            "program_loaded": ms.stored_program is not None, "fault": ms.fault,
             "current_op": ist.get('current_op'), "step_index": ist.get('step_index'),
             "loop_iter":  ist.get('loop_iter'),  "variables":  ist.get('variables'),
         }
@@ -718,9 +764,12 @@ Console commands:
   load <path>        Load a job program JSON file
   run                Start the loaded program
   pause / resume     Pause or resume
+  press start|pause  Emulate a PHYSICAL button press (drives state, no ack;
+                     an attached GUI updates from the next status broadcast)
   fault <reason>     Inject a hardware fault
-  estop              Trigger hardware e-stop
-  estop_release      Release hardware e-stop
+  jam [axis]         Inject a StallGuard stall/jam -> motion_fault (default X)
+  estop              Trigger hardware e-stop (latched)
+  estop_release      Release the latched e-stop (returns to IDLE)
   laser_home/busy    Toggle laser head position
   material on/off    Toggle material presence (TOF-6)
   surface_home <z>   Set virtual stack surface Z (default 10.0mm)
@@ -764,6 +813,13 @@ def console_loop(sm, stop):
             sm._pause_event.set(); sm.ms.set_state(State.PAUSED); print("[sim] Paused")
         elif cmd == "resume":
             sm._pause_event.clear(); sm.ms.set_state(State.RUNNING); print("[sim] Resumed")
+        elif cmd == "press":
+            if len(parts) < 2 or parts[1] not in ("start", "pause"):
+                print("Usage: press start | pause"); continue
+            sm.enqueue_button(parts[1]); print(f"[sim] Physical button: {parts[1]}")
+        elif cmd == "jam":
+            axis = parts[1].upper() if len(parts) > 1 else "X"
+            sm.enqueue_jam(axis); print(f"[sim] Jam on {axis} -> motion_fault")
         elif cmd == "fault":
             if len(parts) < 2: print("Usage: fault <reason>"); continue
             if parts[1] not in VALID_FAULTS_SET:

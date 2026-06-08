@@ -32,15 +32,15 @@ Live questions that are not yet settled. Move an item into the relevant doc
 - **Operator control surface** → latched E-stop + Start/Pause buttons + RGB status
   LED + program-loaded LED + beeper, forming a complete headless interface. Button
   semantics in `architecture.md` §9.1; pins in `pin-mapping.md` §3–§4.
+- **Machine geometry** → **Cartesian gantry** (X / dual-Y / Z) confirmed, not an
+  articulated/SCARA arm. ("Arm" is only a colloquial name for the pick-and-place
+  head.) See `architecture.md` §2.
 
 ---
 
 ## Blocking / high-impact
 
-- **Cartesian gantry vs. articulated arm.** The architecture and pin tables assume a
-  Cartesian X / dual-Y / Z gantry. If it is actually an articulated or SCARA arm,
-  the motion math, homing, and the GUI jog/teach interface all change. This affects
-  both firmware and GUI, so resolve early.
+*(none currently — the gantry-vs-arm question is resolved above)*
 
 ## Sensors / I2C
 

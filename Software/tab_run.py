@@ -157,6 +157,10 @@ class RunTab(QWidget):
         )
         for key, (light, t_col, f_col) in self._lights.items():
             light.set_bool(msg.get(key, False), t_col, f_col)
+        # Trust the firmware's authoritative program_loaded flag when present
+        # (covers a program already stored in EEPROM / loaded headless), while
+        # preserving the locally-tracked value if an older firmware omits it.
+        self._program_loaded = msg.get("program_loaded", self._program_loaded)
         self._update_buttons()
 
     def set_connected(self, connected: bool):

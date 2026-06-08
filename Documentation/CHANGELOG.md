@@ -1,4 +1,26 @@
 
+## v0.9.3
+
+- **Simulator gains physical-button emulation.** New `press start|pause` console
+  command (and `enqueue_button`) drives the headless button map (`architecture.md`
+  §9.1) as a real button would: it changes state with **no** command ack, so an
+  attached GUI updates purely from the next status broadcast — exercising the
+  GUI's externally-driven update path.
+- **Fault/error injection extended for GUI testing.** Added `jam [axis]`
+  (StallGuard-style stall → `motion_fault` with axis), fixed `estop_release` to
+  return ESTOPPED → IDLE per the design, made `reset_fault` re-arm the stop event,
+  and stopped the aborting interpreter from overwriting a `motion_fault`/E-stop
+  reason. `program_loaded` is now reported in the status message.
+- **GUI:** the Run tab now trusts the authoritative `program_loaded` status flag
+  (covers a program already in EEPROM / loaded headless), not just its own load ack.
+  (The Run tab already re-derived banner + button states from every status
+  broadcast, so physical-button-driven changes were already reflected.)
+- **Tests:** +15 (now 189 total) covering button emulation, no-ack behaviour,
+  jam/motion_fault, e-stop release, reset re-arming, every injectable fault, and the
+  `program_loaded` field.
+- **Machine geometry resolved:** Cartesian gantry confirmed (not an articulated
+  arm); moved to resolved in `open-decisions.md`, `architecture.md` §2 updated.
+
 ## v0.9.2
 
 - **Headless control model defined.** Latched E-stop + Start/Pause buttons now form
