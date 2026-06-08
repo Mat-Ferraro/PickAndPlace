@@ -16,6 +16,22 @@ Live questions that are not yet settled. Move an item into the relevant doc
 - **Job execution model** → program interpreter confirmed. Python reference
   implementation in `interpreter.py`; C++ port deferred to hardware phase.
 - **GUI framework** → PyQt6 + pyserial. Simulator over TCP socket.
+- **Stall / jam / homing detection** → **TMC2209 UART + StallGuard4 (now, not
+  deferred).** All four drivers on one single-wire UART bus (MS1/MS2 addressing);
+  `DIAG` → interrupt provides sensorless homing and in-motion jam detection
+  (`motion_fault`). `PDN_UART` and `DIAG` confirmed exposed on the modules in hand.
+  See `architecture.md` §7, §11 and `pin-mapping.md` §2–§3.
+- **Homing strategy** → **sensorless via StallGuard** (drive into a hard stop,
+  detect the stall). Removes physical min-endstops and frees the endstop headers for
+  DIAG + E-stop. Software travel limits after homing; optional hard limit switches as
+  a backstop. See `architecture.md` §7.
+- **Dual-Y gantry** → **independent squaring.** Y2 on the E0 socket with its own
+  STEP/DIR; Y1 and Y2 home to separate `DIAG` lines so each side squares to its own
+  stall. Chosen for gantry accuracy over the simpler slaved option; cost is more
+  firmware and per-side StallGuard tuning. See `architecture.md` §2, §7.
+- **Operator control surface** → latched E-stop + Start/Pause buttons + RGB status
+  LED + program-loaded LED + beeper, forming a complete headless interface. Button
+  semantics in `architecture.md` §9.1; pins in `pin-mapping.md` §3–§4.
 
 ---
 
@@ -38,15 +54,15 @@ Live questions that are not yet settled. Move an item into the relevant doc
 
 ## Motion / drivers
 
-- Final stepper motor choice, and whether TMC2209 StepStick drivers are sufficient
-  under real load or an external driver (TB6600 / DM542 / DM556) is needed.
-- **Homing and travel limits.** Decide X/Y/Z home direction, limit-switch count,
-  min/max vs home-only strategy, switch type (NC preferred), debounce/filtering,
-  homing speeds, backoff distance, and software travel-limit behavior after homing.
-- **Dual-Y gantry strategy.** Decide whether the two Y motors are always slaved
-  together or can home independently to square the gantry. If independent squaring
-  is required, reserve two Y home switches and define fault behavior if one side
-  loses steps.
+- **StallGuard tuning (per axis, and per Y side).** `SGTHRS`/`TCOOLTHRS` must be
+  tuned on hardware; the two Y sides need independent thresholds or the gantry can
+  square crooked. Validate squareness and jam-trip reliability on the bench.
+- Whether the TMC2209 StepSticks hold up thermally at ~2.5 A/phase under load, or an
+  external driver (TB6600 / DM542 / DM556) is needed — note those lose StallGuard, so
+  sensorless homing would have to be reworked.
+- **Remaining homing details.** X/Y/Z home direction, homing speeds, backoff
+  distance, and whether to fit optional hard-limit switches as a backstop behind the
+  mechanical stops.
 - 12 V vs 24 V motor rail.
 - Whether to keep the L298N as a learning/bench module or drop it from the design.
 
@@ -75,11 +91,13 @@ Live questions that are not yet settled. Move an item into the relevant doc
 
 - How to receive direct laser status (dry-contact safe/ready signal, ToF-only
   confirmation, user-mediated workflow with firmware lockout, or a combination).
-- Final hardware E-stop power-removal design (contactor / safety relay selection).
-- Final RAMPS header assignment for Start / Pause / E-stop / interlocks / axis
-  endstops. The current suggested Start/Pause/E-stop use endstop headers, which may
-  conflict with axis limits unless additional headers or an I/O expansion plan is
-  chosen.
+- ~~Final RAMPS header assignment for Start / Pause / E-stop / interlocks / axis
+  endstops.~~ **Resolved.** Sensorless homing freed the endstop headers: D3 = E-stop,
+  D2/D18/D19 = the StallGuard DIAG lines (Y1, Y2, X+Z), buttons on spare GPIO, with
+  D14/D15 left for optional hard limits. See `pin-mapping.md` §3–§4.
+- Final hardware E-stop power-removal design (contactor / safety relay selection)
+  still open — the latched button + firmware ESTOPPED is not the primary safety
+  barrier.
 - **Laser fault naming.** `communication-protocol.md` §6.2 lists both
   `laser_interlock` (interlock not met) and `laser_not_parked` (arm moved while
   the head is unparked), and `architecture.md` §11 uses `laser_not_parked`, but

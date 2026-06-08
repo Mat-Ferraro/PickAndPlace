@@ -382,6 +382,7 @@ goes in `query_sensors`.
 | `material_present` | bool | TOF-6 detects remaining material. |
 | `laser_safe` | bool | Computed interlock result from active mode sources. |
 | `estop_hw` | bool | Hardware e-stop input state. |
+| `program_loaded` | bool | A valid program is stored in EEPROM (CRC + schema OK and passes validation). Gates `run_program` and the headless Start button; drives the program-loaded indicator. |
 | `fault` | str or null | Current fault reason, or null. |
 | `current_op` | str or null | `op` of the executing instruction. Non-null only during `RUNNING` / `PAUSED`. |
 | `step_index` | int or null | Flat instruction index in the program. Non-null only during `RUNNING` / `PAUSED`. |
@@ -404,6 +405,7 @@ Example during a run:
   "material_present": true,
   "laser_safe":       false,
   "estop_hw":         false,
+  "program_loaded":   true,
   "fault":            null,
   "current_op":       "PROBE_Z",
   "step_index":       8,

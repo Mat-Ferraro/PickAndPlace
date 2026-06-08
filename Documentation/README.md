@@ -109,11 +109,14 @@ and the serial-worker framing.
 - Unit test suite (`Software/tests/`, pytest) covering the interpreter, simulator state machine / protocol / chunked transfer, and serial-worker framing.
 
 **Not yet implemented in simulator:**
-- Continuous safety monitors — laser-park interlock (`laser_not_parked`) and pickup-loss detection (`pickup_lost`), documented in `architecture.md` §11. Required in firmware before hardware bring-up.
+- Continuous safety monitors — laser-park interlock (`laser_not_parked`), pickup-loss detection (`pickup_lost`), and StallGuard stall/jam detection (`motion_fault`), documented in `architecture.md` §11. Required in firmware before hardware bring-up.
+- Headless control model (Start/Pause buttons, status LEDs, beeper) and the `program_loaded` flag — designed (`architecture.md` §9, `communication-protocol.md` §7.1), not yet modelled.
 
 **Not yet validated on hardware:**
-- Stepper motion through RAMPS + TMC2209.
+- Stepper motion through RAMPS + TMC2209 in UART mode.
+- StallGuard sensorless homing and per-side dual-Y squaring (threshold tuning).
 - VL53L0X wiring through TCA9548A.
-- Vacuum pump driver.
+- Vacuum pump/valve driver.
 - Hardware-enforced E-stop power removal.
 - EEPROM config and program storage.
+- Headless operation: buttons, status LEDs, beeper.

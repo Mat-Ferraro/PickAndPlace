@@ -1,4 +1,33 @@
 
+## v0.9.2
+
+- **Headless control model defined.** Latched E-stop + Start/Pause buttons now form
+  a complete no-GUI control surface (Start = proceed: home/run/resume; Pause = halt/
+  dismiss: pause/clear-fault; E-stop release → IDLE). Buttons synthesize the same
+  internal commands as the serial parser. Specified in `architecture.md` §9.1.
+- **Status indicators added to the design.** External RGB status LED, program-loaded
+  LED, and a beeper (onboard LED is under the shield). `architecture.md` §9.2.
+- **`program_loaded` added** to the status message (`communication-protocol.md`
+  §7.1): firmware reports whether a valid program is in EEPROM; gates `run_program`
+  and the headless Start button.
+- **Stall/jam/homing detection committed to TMC2209 UART + StallGuard4.** Sensorless
+  homing (DIAG-on-endstop) plus in-motion jam detection → `motion_fault`; added as a
+  third continuous safety monitor (`architecture.md` §11). UART promoted from
+  "later" to "now."
+- **Dual-Y resolved to independent squaring.** Y2 driven from the E0 socket with its
+  own STEP/DIR; Y1/Y2 home to separate DIAG lines so each side squares to its own
+  stall.
+- **`pin-mapping.md` rebuilt** around the above: Y2 on E0; endstop headers carry
+  E-stop (D3) + StallGuard DIAG (Y1 D2, Y2 D18, X+Z OR'd D19); shared single-wire
+  TMC UART; Start/Pause + RGB LED + program LED + beeper on spare GPIO; pump/valve on
+  D8/D9; added a pin-budget summary.
+- **`open-decisions.md`:** moved dual-Y, homing strategy, TMC UART, operator-control
+  surface, and RAMPS header allocation to resolved; recorded StallGuard per-side
+  tuning and external-driver caveats as the remaining motion items.
+- **`components-and-references.md`:** TMC2209 `PDN_UART`/`DIAG` confirmed exposed,
+  UART mode committed (`TMCStepper`); added LED / beeper / button / latched-E-stop
+  hardware to the inventory.
+
 ## v0.9.1
 
 - **Program editor tab implemented.** New "Program" tab in `pnp_gui.py`

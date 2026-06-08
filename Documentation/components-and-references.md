@@ -12,15 +12,18 @@ datasheets currently held in the project; anything not yet confirmed is marked.
 |---|---|---|
 | Elegoo / Arduino Mega 2560 R3 | Controller | Bench-verified (upload, blink, serial, button, servo, solenoid) |
 | RAMPS 1.4 shield | Expansion (stepper sockets, MOSFET outputs, endstops, servo headers, I2C breakout) | Installed |
-| Teyleten Robot TMC2209 V2.0 StepStick | Stepper drivers | Installed, motion not yet tested; chip datasheet held, exact module pinout still needed |
+| Teyleten Robot TMC2209 V2.0 StepStick | Stepper drivers (UART mode) | Installed, motion not yet tested; `PDN_UART` and `DIAG` pads confirmed exposed (enables UART + StallGuard sensorless homing) |
 | 42BYGHW811 NEMA 17 stepper | Candidate axis motor | Candidate; ~2.5 A/phase (datasheet still needed) |
-| MG90S-style micro servo | Vacuum-release actuator candidate | Movement tested |
-| AEDIKO 12 V 1-ch relay module | Pump/solenoid ON/OFF candidate | Candidate |
+| MG90S-style micro servo | Door / laser-button actuators (×2) | Movement tested |
+| AEDIKO 12 V 1-ch relay module | Pump/solenoid ON/OFF candidate | Candidate (driver choice still open) |
 | L298N dual H-bridge | Bench DC-motor experiments only | Likely not in final design |
 | Hosyond 2.42" 128x64 SSD1309 OLED | Optional local status display | Optional |
 | 6× VL53L0X ToF sensor | Pickup verification + laser-home + material detection | Not yet wired |
 | TCA9548A | I2C mux for the six identical VL53L0X sensors | Not yet wired |
-| 3-wire mushroom E-stop button | Stop / E-stop monitor input | Input tested |
+| 3-wire mushroom E-stop button (latched) | Latched stop; release clears ESTOPPED → IDLE | Input tested |
+| RGB status LED + program-loaded LED | Headless state indication (onboard LED is under the shield) | To source; pins assigned (`pin-mapping.md` §4) |
+| Piezo beeper | Headless audible status (press confirm, fault alert, refused-action chirp) | To source |
+| 2× momentary pushbutton (Start, Pause) | Headless operator controls | To source |
 
 ---
 
@@ -81,8 +84,10 @@ datasheets currently held in the project; anything not yet confirmed is marked.
 
 ### 2.4 TMC2209 stepper driver [ref: TMC2209 datasheet]
 
-- **Use mode:** STEP/DIR standalone mode first; UART configuration/diagnostics can
-  be added later after basic motion is validated.
+- **Use mode:** **UART mode (committed)** — required for StallGuard4 sensorless
+  homing and jam detection. STEP/DIR carries motion; the shared single-wire UART bus
+  (MS1/MS2 addressing) configures current/microstepping and reads load. `PDN_UART`
+  and `DIAG` are confirmed exposed on the modules in hand. Library: `TMCStepper`.
 - **Current capability:** the TMC2209 chip is suitable for quiet two-phase stepper
   control, but the practical current limit depends heavily on the exact StepStick
   module, sense resistors, PCB copper, heatsink, airflow, and enclosure temperature.
@@ -158,18 +163,21 @@ manufacturer docs when available.
 
 ### Still needed
 
-- **Motion/drivers:** exact Teyleten V2.0 TMC2209 StepStick module pinout and
-  Vref/current-limit formula; 42BYGHW811 datasheet; manual for any larger external
-  driver (TB6600 / DM542 / DM556) if the build moves to one.
+- **Motion/drivers:** Teyleten V2.0 TMC2209 `PDN_UART`/`DIAG` pads confirmed exposed;
+  still needed are the module's Vref/current-limit formula and the 42BYGHW811
+  datasheet, plus a manual for any larger external driver (TB6600 / DM542 / DM556) if
+  the build moves to one (note: external drivers lose StallGuard).
 - **Vacuum/actuators:** **vacuum pump datasheet — still the most important gap**;
   solenoid valve datasheet (if used); AEDIKO relay module page; MOSFET driver
   module datasheet (if used); MG90S / MG90S-SV01 servo datasheet.
-- **Operator interface:** Hosyond SSD1309 OLED page + SSD1309 / U8g2 reference.
+- **Operator interface:** Hosyond SSD1309 OLED page + SSD1309 / U8g2 reference;
+  RGB status LED, program-loaded LED, beeper, and Start/Pause button parts.
 - **Power/safety:** 12 V / 24 V supply spec; external 5 V servo/sensor supply spec;
   fuse/breaker/E-stop contact-block/safety-relay datasheets once selected; wire,
   connector, and terminal-block ratings for actuator power.
-- **Software libraries:** Servo, AccelStepper (or chosen motion lib), a VL53L0X
-  Arduino library, TCA9548A mux reference, SSD1309/U8g2/Adafruit_GFX, ArduinoJson.
+- **Software libraries:** `TMCStepper` (UART + StallGuard), Servo, AccelStepper (or
+  chosen motion lib), a VL53L0X Arduino library, TCA9548A mux reference,
+  SSD1309/U8g2/Adafruit_GFX, ArduinoJson.
 
 ### VL53L0X API reference
 

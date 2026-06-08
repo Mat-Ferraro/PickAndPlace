@@ -45,10 +45,17 @@ final load.
 
 ### Stepper drivers
 
-Preferred: TMC2209 StepStick. Use STEP/DIR first; UART is optional later.
-Alternatives: DRV8825 (light testing), A4988 (not preferred at 2.5 A/phase),
-or external TB6600 / DM542 / DM556 if more sustained current or thermal margin is
-needed.
+Preferred: TMC2209 StepStick, run in **UART mode** (committed — not deferred). UART
+lets the firmware set current/microstepping in software and read **StallGuard4**
+load for sensorless homing and jam detection (see §7 and §11). All four drivers
+share one single-wire UART bus, addressed individually via their MS1/MS2 jumpers.
+Alternatives if the StepSticks run hot or lack torque at ~2.5 A/phase: external
+TB6600 / DM542 / DM556 (but those lose StallGuard, so sensorless homing would need
+rethinking).
+
+The two Y motors (Y1, Y2) are driven **independently** — Y2 from the E0 socket with
+its own STEP/DIR — so the gantry is squared by homing each Y side to its own stall
+rather than slaving them. See `open-decisions.md` and `pin-mapping.md`.
 
 **Driver safety rules:** insert drivers only with USB and motor power disconnected;
 verify orientation before power; align the motor-output side with the RAMPS labels
@@ -144,13 +151,27 @@ polyfuses). See `open-decisions.md`.
 
 ## 7. Homing and travel limits
 
-The motion architecture requires a homing/limit strategy before final motion code.
-Open decisions include: X/Y/Z home direction, min/max limit switch count, whether
-software travel limits are sufficient after homing, and whether the dual-Y gantry
-needs independent homing/squaring. The current suggested Start/Pause/E-stop mapping
-uses RAMPS endstop headers, so final input allocation must reserve enough headers
-for both operator controls and axis limits. See `pin-mapping.md` and
-`open-decisions.md`.
+**Homing is sensorless**, using TMC2209 StallGuard4: each axis is driven into a
+solid mechanical hard stop and the resulting motor stall (reported on the driver's
+`DIAG` pin) is taken as the home reference. This removes the physical min-endstop
+switches and frees the RAMPS endstop headers to carry the `DIAG` lines and the
+E-stop (see `pin-mapping.md` §3).
+
+- **Sequence:** axes home one at a time, so X and Z can share a single OR'd `DIAG`
+  line. The two Y motors home **independently** to square the gantry — each Y side
+  is driven to its own stall on a **separate** `DIAG` line, so the firmware stops
+  each side individually and corrects racking on every home.
+- **Travel limits:** after homing, software travel limits bound commanded motion; a
+  `MOVE` outside the envelope faults at runtime. Optional hard limit switches on the
+  spare Y_MIN/Y_MAX headers can back the mechanical stops.
+- **Tuning:** StallGuard sensitivity (`SGTHRS`) is tuned per axis, and **per Y side**
+  for squaring — differing friction/load between the two sides can square the gantry
+  crooked, so each side's threshold is calibrated and squareness validated on
+  hardware. StallGuard needs a minimum velocity (`TCOOLTHRS`) to read load, so it
+  protects transit moves but not very slow ones (those rely on ToF, e.g. `PROBE_Z`).
+
+Remaining open items (home direction/speeds, backoff, whether to fit the optional
+hard-limit switches) are tracked in `open-decisions.md`.
 
 ## 8. Machine positions and states
 
@@ -172,20 +193,73 @@ and pickup loss detection) that trigger FAULTED regardless of program state.
 
 ## 9. Physical controls and safety
 
-Required controls: E-stop, Start, Pause. Wire dry contacts between the RAMPS endstop
-header `S` and `-` pins, configured `INPUT_PULLUP`, NC preferred for stop/interlock
-inputs.
+Three physical controls — a latched **E-stop** plus **Start** and **Pause**
+buttons — together with external status LEDs and a beeper form a complete headless
+control surface (the machine can be operated with no GUI attached). Pin assignments
+are in `pin-mapping.md` §3–§4.
 
-### 9.1 E-stop
+### 9.1 Headless control model
 
-Firmware monitors E-stop and enters `ESTOPPED`, **but software is not the primary
-safety mechanism.** The final design must include a hardware-enforced circuit that
-removes power/enable from hazardous actuators independent of firmware; the software
-state is for diagnostics, handling, and reporting. Wiring the E-stop to a Mega
-hardware-interrupt pin (D2/D3/D18/D19 are the free ones [ref: Mega pinout]) is good
-practice — the v0.5 assignment of E-stop to X_MIN/D3 lands on INT5.
+The two momentary buttons are **context-dependent**: their meaning depends on the
+current state, which is why the status indicators (§9.2) are functionally required,
+not cosmetic — the operator must be able to read the state to know what a press will
+do. The two-verb mental model is **Start = "proceed"**, **Pause = "halt / dismiss"**.
 
-### 9.2 Laser interlock
+| State | Start | Pause |
+|---|---|---|
+| IDLE | `home` → HOMING | — |
+| HOMING | — | — |
+| READY | `run_program` *(only if a valid program is loaded)* → RUNNING | — |
+| RUNNING | — | `pause` → PAUSED |
+| PAUSED | `resume` → RUNNING | — |
+| FAULTED | — | `reset_fault` → IDLE |
+| ESTOPPED | — | — *(cleared by releasing the latched E-stop)* |
+
+Both recovery exits — clearing a fault and releasing E-stop — land in **IDLE**,
+which is inert and requires a deliberate Start to home before anything moves. So a
+reflexive Pause that clears a fault cannot cause motion; worst case the operator
+re-presses Start. No hold-to-confirm is needed for this reason.
+
+**Implementation note:** the button handler synthesises the *same internal commands*
+the serial parser produces (`home`, `run_program`, `pause`, `resume`, `reset_fault`).
+There is one state machine with two input sources (serial and physical), so the
+transitions are identical whether triggered by the GUI or a button — and they are
+already exercised by the simulator's state-transition tests.
+
+To start a stored program headless: power on → IDLE (no motion) → press Start to
+home → READY → press Start to run. A program can only be *loaded* over USB; the
+buttons can only *run* the program already stored in EEPROM. "Set up over USB once,
+then run repeatedly headless" is the intended workflow (see §10, §12). Whether a
+valid program is present is reported by `program_loaded` in the status message
+(`communication-protocol.md` §7.1); Start in READY with no valid program is refused
+with an error indication rather than running.
+
+### 9.2 Status indicators
+
+The onboard Mega LED is hidden under the shield, so status is shown on external
+indicators driven from GPIO:
+
+- **RGB status LED** — machine state by colour, with blink reserved for
+  attention/transient states (e.g. green = READY, green slow-blink = READY-but-no-
+  program, green fast-blink/blue = RUNNING, amber-blink = PAUSED, red-blink =
+  FAULTED, red-solid = ESTOPPED, white-blink = HOMING).
+- **Program-loaded LED** — solid when a valid program is in EEPROM.
+- **Beeper** — confirms button presses (especially that a press registered),
+  chirps when an action is refused (Start with no program), and is the primary
+  attention-getter on a fault when no one is watching the LEDs.
+
+### 9.3 E-stop
+
+E-stop is a **hardware-latched** button (NC, fail-safe — a broken wire reads as
+E-stop). When latched the firmware enters `ESTOPPED`; physically releasing the latch
+returns the machine to `IDLE` (it does not auto-resume — position trust is lost, so
+a re-home is required). **Software is not the primary safety mechanism.** The final
+design must include a hardware-enforced circuit that removes power/enable from
+hazardous actuators independent of firmware; the software state is for diagnostics,
+handling, and reporting. E-stop is wired to a Mega hardware-interrupt pin
+(D2/D3/D18/D19 [ref: Mega pinout]); the assignment is X_MIN/D3 (INT5).
+
+### 9.4 Laser interlock
 
 The machine must not enter the laser workspace unless the laser head is confirmed
 parked/home (TOF-5), the laser is not operating, and the state machine permits it.
@@ -233,8 +307,17 @@ active headless; state transitions are logged/reported.
    (object no longer detected), raise `pickup_lost` and stop motion immediately.
    This catches workpieces dropped mid-transit and arm moves with nothing grabbed.
 
-Both faults transition the machine to FAULTED, halt the program executor, and
-require an explicit `reset_fault` + `home` before resuming. Neither can be caught
+3. **Stall / jam detection (StallGuard).** During transit moves, the TMC2209
+   `DIAG` lines flag a motor stall (jam, obstruction, or unexpected hard stop). A
+   trip aborts motion and raises `motion_fault` with the offending axis. StallGuard
+   needs a minimum velocity, so it covers transit moves but not very slow ones;
+   slow precision moves (e.g. `PROBE_Z`) are covered by ToF instead. Steppers are
+   open-loop, so this is the primary defence against silent lost steps — a software
+   move-duration timeout cannot catch a jam, because step generation continues on
+   schedule regardless of whether the motor turned.
+
+All three faults transition the machine to FAULTED, halt the program executor, and
+require an explicit `reset_fault` + `home` before resuming. None can be caught
 or handled from within the job program.
 
 ## 12. Persistent configuration
