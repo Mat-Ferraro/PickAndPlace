@@ -9,130 +9,137 @@ Live questions that are not yet settled. Move an item into the relevant doc
 
 - **Vacuum release** → solenoid valve confirmed. See `architecture.md` §6.
 - **Servo assignments** → door servo SERVO2/D5, laser button SERVO3/D4.
-  See `architecture.md` §6.1 and `pin-mapping.md`.
-- **Firmware state machine** → simplified to 7 states (IDLE, HOMING, READY,
-  RUNNING, PAUSED, FAULTED, ESTOPPED). Detailed mid-job states moved into
-  job programs. See `communication-protocol.md` §2.
+- **Firmware state machine** → 8 states (IDLE, HOMING, READY, RUNNING, PAUSED,
+  FAULTED, ESTOPPED, CALIBRATING). CALIBRATING added for automated steps/mm
+  calibration. See `firmware-architecture.md`.
 - **Job execution model** → program interpreter confirmed. Python reference
-  implementation in `interpreter.py`; C++ port deferred to hardware phase.
+  implementation in `interpreter.py`; C++ port complete and host-tested.
 - **GUI framework** → PyQt6 + pyserial. Simulator over TCP socket.
-- **Stall / jam / homing detection** → **TMC2209 UART + StallGuard4 (now, not
-  deferred).** All four drivers on one single-wire UART bus (MS1/MS2 addressing);
-  `DIAG` → interrupt provides sensorless homing and in-motion jam detection
-  (`motion_fault`). `PDN_UART` and `DIAG` confirmed exposed on the modules in hand.
-  See `architecture.md` §7, §11 and `pin-mapping.md` §2–§3.
-- **Homing strategy** → **sensorless via StallGuard** (drive into a hard stop,
-  detect the stall). Removes physical min-endstops and frees the endstop headers for
-  DIAG + E-stop. Software travel limits after homing; optional hard limit switches as
-  a backstop. See `architecture.md` §7.
-- **Dual-Y gantry** → **independent squaring.** Y2 on the E0 socket with its own
-  STEP/DIR; Y1 and Y2 home to separate `DIAG` lines so each side squares to its own
-  stall. Chosen for gantry accuracy over the simpler slaved option; cost is more
-  firmware and per-side StallGuard tuning. See `architecture.md` §2, §7.
-- **Operator control surface** → latched E-stop + Start/Pause buttons + RGB status
-  LED + program-loaded LED + beeper, forming a complete headless interface. Button
-  semantics in `architecture.md` §9.1; pins in `pin-mapping.md` §3–§4.
-- **Machine geometry** → **Cartesian gantry** (X / dual-Y / Z) confirmed, not an
-  articulated/SCARA arm. ("Arm" is only a colloquial name for the pick-and-place
-  head.) See `architecture.md` §2.
+- **Stall / jam / homing detection** → TMC2209 UART + StallGuard4. All four
+  drivers on one single-wire UART bus; DIAG interrupt provides sensorless homing
+  and in-motion jam detection. See `architecture.md` §7, §11.
+- **Homing strategy** → sensorless via StallGuard (drive into hard stop, detect
+  stall). Removes physical endstops; software travel limits after homing.
+- **Dual-Y gantry** → independent squaring. Y2 on E0 socket; Y1/Y2 home to
+  separate DIAG lines.
+- **Operator control surface** → latched E-stop + Start/Pause + RGB LED +
+  program-loaded LED + beeper. Button semantics in `architecture.md` §9.1.
+- **Machine geometry** → Cartesian gantry (X / dual-Y / Z) confirmed.
+- **Chunked transfer (C++ firmware)** → implemented. `begin_transfer` /
+  `program_chunk` / `end_transfer` fully ported and host-tested (32 SM tests).
+- **Pump driver** → relay module on D32 (AUX-4 pin 3). AEDIKO 12V 1-ch
+  optocoupler relay, HIGH-level trigger. Flyback diode across pump load.
+  See `pin-mapping.md`.
+- **Persistent config architecture** → Mega EEPROM. `Config` struct with
+  `version` byte + CRC16. Load at boot, save after calibration. `#ifdef ARDUINO`
+  guards on EEPROM I/O keep CRC logic host-testable. Implementation pending.
+- **Steps/mm calibration mechanism** → automated traverse. Firmware homes axis,
+  drives to far hard stop via StallGuard, counts raw steps. User supplies actual
+  travel distance via GUI. `steps_per_mm = raw_steps / distance_mm`. No need to
+  know belt pitch, pulley count, or microstepping. See `firmware-architecture.md`.
+- **Protocol version** → v1.0. See `communication-protocol.md`.
+- **RAMPS header assignment** → resolved. See `pin-mapping.md`.
 
 ---
 
 ## Blocking / high-impact
 
-*(none currently — the gantry-vs-arm question is resolved above)*
+*(none currently)*
+
+---
+
+## Firmware
+
+- **Config/EEPROM implementation** — architecture decided (see resolved above),
+  code not yet written. Last host-testable firmware piece before bench work.
+  Includes: `steps_per_mm[3]`, servo angles, probe params, CRC16, schema version,
+  safe-defaults on invalid CRC. Also stores the loaded job program.
+
+---
 
 ## Sensors / I2C
 
-- **VL53L0X voltage path.** Confirm whether the modules on hand are bare (2.8 V,
-  3.6 V-max signal pins — need translation) or breakout boards with an onboard
-  regulator + level shifter (accept 5 V). See `components-and-references.md` §3.
-- **TCA9548A translation wiring (if bare modules).** Select VCC and per-channel
-  pull-up resistor values using the datasheet's Vpass-vs-VCC curve and the
-  Rp(min)/Rp(max) equations against six-channel bus capacitance. Not yet a settled
-  value.
+- **VL53L0X voltage path.** Confirm whether modules on hand are bare (2.8 V,
+  need level translation) or breakout boards with onboard regulator (accept 5 V).
+  See `components-and-references.md` §3.
+- **TCA9548A pull-up wiring (if bare modules).** Select per-channel pull-up
+  values using the datasheet Rp(min)/Rp(max) equations vs six-channel bus
+  capacitance.
+- **ToF offset calibration.** Each VL53L0X sits some fixed distance above the
+  actual contact/surface point. That offset must be measured and subtracted from
+  `PROBE_Z` readings. VL53L0X also has built-in crosstalk compensation for covered
+  glass — needs to be run once per sensor on first install.
+
+---
 
 ## Motion / drivers
 
-- **StallGuard tuning (per axis, and per Y side).** `SGTHRS`/`TCOOLTHRS` must be
-  tuned on hardware; the two Y sides need independent thresholds or the gantry can
-  square crooked. Validate squareness and jam-trip reliability on the bench.
-- Whether the TMC2209 StepSticks hold up thermally at ~2.5 A/phase under load, or an
-  external driver (TB6600 / DM542 / DM556) is needed — note those lose StallGuard, so
-  sensorless homing would have to be reworked.
-- **Remaining homing details.** X/Y/Z home direction, homing speeds, backoff
-  distance, and whether to fit optional hard-limit switches as a backstop behind the
-  mechanical stops.
-- 12 V vs 24 V motor rail.
-- Whether to keep the L298N as a learning/bench module or drop it from the design.
+- **StallGuard tuning (per axis, per Y side).** `SGTHRS`/`TCOOLTHRS` must be
+  tuned on hardware. Y1 and Y2 may need independent thresholds; mismatched
+  sensitivity causes the gantry to square crooked. Validate on the bench.
+- **Y-axis squaring verification.** After homing both Y sides, confirm the
+  gantry beam is physically square (measure diagonals). Document the squaring
+  trim procedure.
+- **TMC2209 thermal headroom.** Confirm the StepStick modules hold up at
+  ~2.5 A/phase under load. If not, external driver (TB6600/DM542) — but those
+  lose StallGuard and require reworking homing.
+- **Homing details.** Per-axis home direction, homing speed, backoff distance,
+  and whether to fit optional hard-limit switches as a backstop.
+- **12 V vs 24 V motor rail.**
+
+---
 
 ## Vacuum / actuators
 
-- **Pump model, voltage, continuous current, and startup/stall current** — pump
-  datasheet still needed. Most important missing reference.
-- Pump speed control vs simple ON/OFF.
-- Vacuum release: servo valve, solenoid valve, or pump reversal.
-- Pump/valve driver: relay vs MOSFET module vs **RAMPS MOSFET output**. The RAMPS
-  output is now more plausible (logic-level STP55NF06L parts), pending a
-  current-path / connector / fuse-rating check (~5 A / ~11 A polyfuses).
-- Whether to add a vacuum pressure sensor in addition to ToF pickup verification.
+- **Pump datasheet** — model, voltage, continuous current, startup/stall current.
+  Most important missing reference.
+- **Pump speed control** vs simple ON/OFF.
+- **Servo angle calibration** — door open/closed angles, laser-button press/
+  release angles. Must be measured and stored in Config.
+
+---
+
+## Calibration (new)
+
+- **Steps/mm verification procedure.** After automated calibration, command a
+  known distance (e.g. 100 mm) and measure actual travel. Document acceptable
+  error tolerance and the correction workflow.
+- **Re-calibration policy.** Under what conditions should the operator re-run
+  calibration? (Belt replacement, pulley change, after any motion fault during
+  homing.) Document in operator guide.
+- **ToF calibration persistence.** ToF offset and crosstalk values per sensor
+  channel need to live in Config alongside `steps_per_mm`. Add to Config schema
+  before finalising.
+
+---
 
 ## Operator interface / system
 
 - Whether the SSD1309 OLED is in the final operator panel.
-- Whether LCD/encoder manual input is needed.
 - Whether thermistors are needed.
 - Whether RS-485 is ever needed beyond USB serial.
-- Final persistent-configuration storage method (Mega EEPROM vs GUI-loaded vs
-  hybrid), including schema version, CRC/checksum, defaults, invalid-config
-  behavior, and EEPROM wear rules.
+
+---
 
 ## Safety / laser
 
-- How to receive direct laser status (dry-contact safe/ready signal, ToF-only
-  confirmation, user-mediated workflow with firmware lockout, or a combination).
-- ~~Final RAMPS header assignment for Start / Pause / E-stop / interlocks / axis
-  endstops.~~ **Resolved.** Sensorless homing freed the endstop headers: D3 = E-stop,
-  D2/D18/D19 = the StallGuard DIAG lines (Y1, Y2, X+Z), buttons on spare GPIO, with
-  D14/D15 left for optional hard limits. See `pin-mapping.md` §3–§4.
-- Final hardware E-stop power-removal design (contactor / safety relay selection)
-  still open — the latched button + firmware ESTOPPED is not the primary safety
-  barrier.
-- **Laser fault naming.** `communication-protocol.md` §6.2 lists both
-  `laser_interlock` (interlock not met) and `laser_not_parked` (arm moved while
-  the head is unparked), and `architecture.md` §11 uses `laser_not_parked`, but
-  the simulator's injectable fault set currently only has `laser_interlock`.
-  Settle one canonical reason per condition before the firmware implements the
-  continuous laser-park monitor.
+- **Laser fault naming.** `laser_interlock` vs `laser_not_parked` — settle one
+  canonical reason per condition before SafetyMonitor is implemented.
+- **Hardware E-stop power-removal design.** Contactor / safety relay selection.
+  The latched button + firmware ESTOPPED state is not the primary safety barrier.
+- **Laser status input.** Dry-contact safe/ready signal, ToF-only confirmation,
+  or user-mediated workflow?
+
+---
 
 ## Protocol
 
-- ~~Protocol v0.9 locked~~ **Resolved.** See `communication-protocol.md`.
-- ~~Program editor tab~~ **Resolved.** Waypoint-based editor implemented.
-  Generates MOVE / PROBE_Z sequences from a table. Load, save, validate, upload.
-
-- ~~**Chunked `load_program` transfer.**~~ **Resolved for GUI + simulator.**
-  The GUI chunks programs over 200 bytes using the `begin_transfer` /
-  `program_chunk` / `end_transfer` sequence (`communication-protocol.md` §4.3),
-  and the simulator implements the receiving side. Two follow-ups remain for
-  hardware: the C++ firmware must implement the same sequence, and a
-  partial-transfer timeout is still needed (the simulator does not yet discard
-  an abandoned transfer — it holds the buffer until the next `begin_transfer`).
-
-- **Multi-sheet odd-batch limitation.** If a loop iteration picks up more than
-  one sheet and the total batch count is odd, the final pickup attempt on the last
-  iteration fails silently — the arm executes the waypoints with nothing grabbed.
-  Resolution requires pickup verification: a READ_SENSOR step after each pickup
-  that checks ch0–3 and branches on failure. Defer until hardware validation
-  informs the threshold values and failure modes. For now, multi-sheet programs
-  require even batch counts.
-
-- **Continuous safety monitors not yet in simulator.** Two firmware-level
-  safety checks are documented in `architecture.md` §11 but not yet implemented
-  in `simulator.py`:
-  1. **Laser park interlock** — fault `laser_not_parked` if arm moves while
-     ToF ch4 reads out-of-range.
-  2. **Pickup loss detection** — fault `pickup_lost` if pump ON + arm moving +
-     all pickup ToF sensors (ch0–3) lose the object.
-  These must be implemented in firmware before hardware bring-up. Simulator
-  implementation is optional but would improve fault-injection test coverage.
+- **Multi-sheet odd-batch limitation.** If a loop picks up more than one sheet
+  and the total count is odd, the final iteration fails silently. Resolution
+  requires pickup verification (READ_SENSOR after each pickup). Defer until
+  hardware validation informs threshold values.
+- **Continuous safety monitors not yet in simulator.** Laser-park interlock and
+  pickup-loss detection documented in `architecture.md` §11 but not implemented
+  in `simulator.py`. Implement in firmware before hardware bring-up.
+- **Partial-transfer timeout.** Simulator holds a partial transfer buffer
+  indefinitely; firmware should discard abandoned transfers after a timeout.

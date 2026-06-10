@@ -1,105 +1,201 @@
 # Firmware Architecture
 
-Status: scaffold (comms-first milestone). MCU firmware for the pick-and-place
-gantry — Arduino Mega 2560 + RAMPS 1.4. Built in the Arduino IDE, with the
-portable logic unit-tested on the host. This document records the structure and
-the decisions behind it; it complements `architecture.md` (system) and
-`communication-protocol.md` (wire format).
+**Status:** core logic complete, host-tested. Real HAL pending (bench).
+MCU firmware for the pick-and-place gantry — Arduino Mega 2560 + RAMPS 1.4.
+Built in the Arduino IDE; portable logic unit-tested on the host with g++/Unity.
 
-## Guiding idea: the firmware is a *port*, not a fresh design
+---
 
-The behaviour is already specified and tested in Python — `interpreter.py`, the
-simulator's `StateMachine`, `ProgramValidator`, and the protocol, with 189
-passing tests. The firmware ports that logic to C++. The Python tests are the
-spec the C++ must satisfy, and they translate into the host test suite.
+## Guiding idea: the firmware is a port, not a fresh design
 
-## The one structural rule: logic depends only on `IMachine`
+The behaviour is already specified and tested in Python — `interpreter.py`,
+the simulator's `StateMachine`, `ProgramValidator`, and the protocol — with
+189 passing Python tests. The firmware ports that logic to C++. The Python
+tests are the spec; they translate directly into the host Unity suite.
 
-Every layer above the hardware (state machine, interpreter, protocol) depends
-only on the abstract `IMachine` interface — never on Arduino APIs directly.
-`IMachine` is the C++ twin of the Python `MachineInterface`/`FakeMachine` seam.
+---
 
-- On the Mega, `IMachine` is implemented by `Machine` (real peripherals).
-- In tests, it's implemented by `MockMachine` (records calls, scriptable) — the
-  twin of `FakeMachine` in `conftest.py`.
-- For comms-first bring-up, `StubMachine` (no hardware) lets the upper layers
-  run on the Mega before any driver exists.
+## The structural rule: logic depends only on `IMachine`
 
-Adaptations from Python for AVR: no exceptions (abortable operations return
-`OpResult` instead of raising `ProgramFault`); no dynamic allocation in the hot
-path; time is **injected** (`tick(nowMs)`) rather than read from a clock, which
-keeps transitions deterministic under host tests.
+Every layer above the hardware depends only on the abstract `IMachine` interface.
+Never on Arduino APIs directly. This is what allows the logic to compile and run
+under host unit tests.
+
+| Context | `IMachine` implementation |
+|---|---|
+| Host tests | `MockMachine` — records every call, returns scripted values |
+| Comms-first bring-up | `StubMachine` — no-ops everything, returns safe defaults |
+| Real hardware | `Machine` — TMC2209/AccelStepper/ToF/servos (bench-validated) |
+
+**AVR adaptations from Python:**
+- No exceptions — abortable operations return `OpResult` instead of raising
+- No hot-path heap allocation — fixed buffers; `ProgramStore` buffers the
+  raw JSON in `malloc`'d memory only during a transfer, freed immediately after parse
+- Time injected (`tick(nowMs)`) rather than read — keeps transitions deterministic
+- String literals in PROGMEM via `PNP_STREQ`/`PNP_SNPRINTF` macros
+
+---
 
 ## Layout
 
 ```
 Firmware/
-  PnpFirmware/                  Arduino sketch (open this in the IDE)
-    PnpFirmware.ino             setup()/loop(): wires protocol + SM + stub HAL
-    src/                        compiled recursively by the Arduino IDE
+  PnpFirmware/                  Arduino sketch (open in the IDE)
+    PnpFirmware.ino             setup()/loop() — wires protocol + SM + stub HAL
+    src/
       core/
-        State.h                 7-state enum + bitmask helper
-        StateMachine.h/.cpp     state machine + command gating  (PORTED, tested)
-        Interpreter.h           TODO: port of interpreter.py
-        ProgramValidator.h      TODO: port of ProgramValidator
+        State.h                 8-state enum + bitmask helper
+        StateMachine.h/.cpp     state machine + command gating       (DONE, tested)
+        Interpreter.h/.cpp      job program executor                 (DONE, tested)
+        ProgramValidator.h/.cpp program structure validator          (DONE, tested)
+        ProgramStore.h/.cpp     chunked transfer + JSON storage      (DONE, tested)
+        Interpreter.h           stub placeholder for future TODOs
       hal/
-        IMachine.h              abstract HAL interface  ← the FakeMachine seam
+        IMachine.h              abstract HAL interface
         StubMachine.h           no-hardware impl (comms-first)
-        Machine.h               TODO: real hardware impl (bench-validated)
+        Machine.h               TODO: real hardware (bench)
       protocol/
-        Protocol.h/.cpp         JSON-over-serial (only ArduinoJson/Serial user)
-      config/Config.h           TODO: EEPROM config + program storage + CRC
-      safety/SafetyMonitor.h    TODO: laser-park / pickup-loss / StallGuard
-      platform/Platform.h       host millis() shim for off-target builds
-  test/                         host (g++) Unity suite — runs on the PC
-    MockMachine.h               recording IMachine double (= FakeMachine)
-    test_state_machine.cpp      first ported tests (12, passing)
+        Protocol.h/.cpp         JSON-over-serial (Arduino-only layer)
+      config/
+        Config.h                TODO: EEPROM persistence (next)
+      safety/
+        SafetyMonitor.h         TODO: laser-park / pickup-loss / StallGuard
+      platform/
+        Platform.h              PROGMEM macros + host millis() shim
+  test/
+    MockMachine.h               recording IMachine double
+    test_state_machine.cpp      32 tests
+    test_interpreter.cpp        69 tests (interpreter + validator)
     unity/                      vendored Unity (ThrowTheSwitch)
-    Makefile                    `make` builds + runs the host tests
+    Makefile                    `make` builds and runs all host tests
+    ArduinoJson-7.3.1/          vendored ArduinoJson for host builds
+  firmware-architecture.md      this file
 ```
 
-Includes inside `src/` are file-relative (e.g. `"../hal/IMachine.h"`) so the
-Arduino IDE resolves them without special include-path configuration.
+---
 
-## Unit testing (Arduino IDE has no host runner — we bolt one on)
+## States
 
-The portable layers (state machine, and later interpreter / validator / config)
-compile under host `g++` against `MockMachine` + Unity, the same framework used
-in the Acclaro host harnesses. Arduino IDE builds the *same* `.cpp` files for
-the Mega; the host suite in `Firmware/test/` builds them for the PC.
+Eight states (up from the Python simulator's seven — `CALIBRATING` was added
+for the automated steps/mm calibration procedure):
+
+| State | Description |
+|---|---|
+| `Idle` | Powered on, not homed. Position unknown. |
+| `Homing` | Homing sequence running. |
+| `Ready` | Homed. Awaiting command. |
+| `Running` | Interpreter executing a job program. |
+| `Paused` | Interpreter suspended. Resumable. |
+| `Faulted` | Hardware or program fault. Operator intervention needed. |
+| `Estopped` | E-stop active. All motion stopped. |
+| `Calibrating` | Calibration traverse in progress, or awaiting `set_cal_distance`. |
+
+---
+
+## Stepper calibration system
+
+The gantry computes `steps_per_mm` automatically without needing to know belt
+pitch, pulley teeth, or microstepping settings. The procedure:
+
+1. `calibrate_axis X` — homes the axis, then drives toward the far hard stop
+   using StallGuard until stall is detected. `IMachine::traverseToStop()` returns
+   the raw step count.
+2. State holds in `Calibrating` — `cal_steps` in the status broadcast goes
+   non-zero, signalling the GUI to show the "enter distance" dialog.
+3. `set_cal_distance X 420.0` — `steps_per_mm = raw_steps / 420.0`. Stored in
+   `StateMachine::stepsPerMm_[]` (runtime) and eventually in `Config`/EEPROM
+   (persistence — see Config/EEPROM below).
+
+This approach absorbs belt stretch and mechanical tolerances automatically and
+works regardless of the specific hardware configuration.
+
+---
+
+## Unit testing
+
+The host test suite (`Firmware/test/`) compiles the portable `.cpp` files with
+g++ against `MockMachine` + Unity — the same framework used at Acclaro. Arduino
+IDE builds the same files for the Mega.
 
 ```
-cd Firmware/test && make        # builds and runs the host tests
+cd Firmware/test && make    # builds test_state_machine + test_interpreter, runs both
 ```
 
-What is **not** host-tested: the `Machine` HAL implementation — "does the
-TMC2209 actually step" is validated on the bench, not in a unit test.
+**Current totals: 101 tests, 0 failures.**
 
-## Comms-first, and why the GUI "just works"
+| Suite | Tests | Covers |
+|---|---|---|
+| `test_state_machine` | 32 | Command gating, homing, run/pause/estop, transfer, calibration |
+| `test_interpreter` | 69 | All interpreter ops, validator, conditions, flow control, WAIT, abort |
 
-`Protocol` speaks the exact wire format in `communication-protocol.md`, which is
-the same protocol the GUI already uses against the Python simulator over TCP. So
-once the protocol + state machine run on the Mega (even with `StubMachine`), the
-GUI connects over serial with **no GUI changes** — point it at the COM port
-instead of the simulator socket. The current scaffold already answers
-`query_status`, gates commands, applies the core transitions
-(home/run/pause/resume/reset/estop), and broadcasts status.
+What is **not** host-tested: the `Machine` HAL — "does the TMC2209 actually step"
+is validated on the bench.
+
+---
+
+## SRAM budget (Arduino Mega, 8 KB total)
+
+SRAM is the limiting resource on the Mega. Current usage:
+
+| Item | Bytes | Notes |
+|---|---|---|
+| Global variables | ~2700 | After all optimisations |
+| Stack headroom | ~5500 | Available for call frames |
+
+Key optimisations applied:
+- `ProgramStore::buf_` is `malloc`'d only during a transfer and freed immediately
+  after parsing — costs zero BSS (was 2 KB static)
+- `kRequired` validator table eliminated — replaced with `PNP_STREQ` chain
+- All string literals in `.cpp` files use `PNP_STREQ`/`PNP_SNPRINTF` → PROGMEM
+- `Interpreter::kMaxVars` = 8 (down from 16)
+- ArduinoJson v7 manages parsed document on the heap separately
+
+---
+
+## Config/EEPROM (next milestone)
+
+`steps_per_mm` and other calibration values must survive a power cycle.
+
+Planned design:
+```cpp
+struct Config {
+    uint8_t  version;           // schema version
+    float    stepsPerMm[3];     // X, Y, Z
+    // future: servo angles, probe params, named positions, ...
+    uint16_t crc;               // CRC16 of all preceding bytes
+};
+```
+
+- `Config::load()` at boot: validates CRC + version; populates `StateMachine`
+- `Config::save()` after `set_cal_distance`: persists updated value
+- Invalid/absent EEPROM → safe defaults, `config_invalid` fault logged
+- The EEPROM I/O is Arduino-specific (`#ifdef ARDUINO`); CRC logic is portable
+  and host-testable
+
+---
 
 ## Build order
 
-1. **Scaffold + comms-first** (this milestone): `IMachine`/`MockMachine`/
-   `StubMachine`, `StateMachine`, `Protocol`, host tests. GUI can connect.
-2. **Interpreter + validator + Config/EEPROM + chunked transfer** — ports of the
-   Python, host-tested against the translated suite.
-3. **Real `Machine` HAL** — steppers/TMC2209 UART/StallGuard/ToF/servos/outputs,
-   validated on the bench (the current hardware bring-up work plugs in here).
-4. **SafetyMonitor + headless controls** — buttons/LEDs/beeper, continuous
-   monitors raising faults into the state machine.
+| Step | Status | Notes |
+|---|---|---|
+| 1. Scaffold + comms-first | ✅ Done | GUI connects to Mega over serial |
+| 2. Interpreter + validator + chunked transfer | ✅ Done | 101 host tests passing |
+| 2b. Config/EEPROM | ⏳ Next | Last host-testable piece |
+| 3. Real `Machine` HAL | 🔧 Bench | AccelStepper + TMC2209 UART + StallGuard + ToF + servos |
+| 4. SafetyMonitor + headless controls | 🔧 Bench | Buttons, LEDs, beeper, continuous safety monitors |
+
+---
 
 ## Decisions on record
 
-- Build in the Arduino IDE; host tests live in a side `g++`/Unity project.
-- `IMachine` abstraction is mandatory — it is what makes the logic testable.
-- No exceptions / no hot-path allocation; time injected, not read.
-- Libraries: ArduinoJson (v7) now; TMCStepper + AccelStepper when the HAL lands.
+- Arduino IDE build; host tests in a side g++/Unity project.
+- `IMachine` seam is mandatory — it is what makes the logic testable.
+- No exceptions; no hot-path heap allocation; time injected, not read.
+- Libraries: ArduinoJson v7 (now); TMCStepper + AccelStepper (when HAL lands).
 - Port faithfully from the Python reference; translate its tests as we go.
+- `PNP_STREQ`/`PNP_SNPRINTF` macros in `Platform.h` for PROGMEM string handling.
+- `ProgramStore` buffers raw JSON in `malloc`'d heap; passes `const char*` to
+  ArduinoJson (forces string copy), then frees immediately — document is
+  self-contained and `buf_` can be freed safely.
+- Calibration uses automated StallGuard traverse + user-supplied distance;
+  no mechanical spec knowledge required.

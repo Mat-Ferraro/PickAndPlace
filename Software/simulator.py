@@ -43,7 +43,8 @@ class State(str, Enum):
     RUNNING  = "RUNNING"
     PAUSED   = "PAUSED"
     FAULTED  = "FAULTED"
-    ESTOPPED = "ESTOPPED"
+    ESTOPPED    = "ESTOPPED"
+    CALIBRATING = "CALIBRATING"
 
 
 COMMAND_STATES: Dict[str, set] = {
@@ -69,6 +70,8 @@ COMMAND_STATES: Dict[str, set] = {
                        State.PAUSED, State.FAULTED, State.ESTOPPED},
     "set_output":     {State.IDLE, State.READY},
     "set_servo":      {State.IDLE, State.READY},
+    "calibrate_axis":     {State.IDLE, State.READY},
+    "set_cal_distance":   {State.CALIBRATING},
 }
 
 ALWAYS_ACCEPT = {
@@ -128,6 +131,10 @@ class MachineState:
     xfer_size:     int   = 0
     xfer_chunks:   int   = 0
     xfer_received: int   = 0
+    # Stepper calibration
+    cal_axis:      str   = ""
+    cal_raw_steps: int   = 0
+    steps_per_mm:  dict  = field(default_factory=lambda: {"X":0.0,"Y":0.0,"Z":0.0})
     params: Dict[str, Any] = field(default_factory=lambda: {
         "laser_interlock_mode":        0,
         "status_rate_hz":              5,
@@ -298,6 +305,7 @@ class StateMachine:
         self._pause_event = threading.Event()
         self._stop_event  = threading.Event()
         self._homing_done_at: Optional[float] = None
+        self._cal_done_at:    Optional[float] = None
 
     # ---- External API -----------------------------------------------------
 
@@ -320,6 +328,7 @@ class StateMachine:
         with self._lock:
             self._drain_queue()
             self._tick_homing()
+            self._tick_calibrating()
             self._tick_interpreter()
 
     def _tick_homing(self):
@@ -328,6 +337,14 @@ class StateMachine:
             self.ms.x_mm = self.ms.y_mm = self.ms.z_mm = 0.0
             self.ms.set_state(State.READY)
             self._homing_done_at = None
+
+    def _tick_calibrating(self):
+        if (self.ms.state == State.CALIBRATING and self._cal_done_at and
+                time.monotonic() >= self._cal_done_at):
+            # Simulate a traverse: fake steps based on axis
+            fake_steps = {"X": 12800, "Y": 12800, "Z": 6400}
+            self.ms.cal_raw_steps = fake_steps.get(self.ms.cal_axis, 3200)
+            self._cal_done_at = None   # stay CALIBRATING, await set_cal_distance
 
     def _tick_interpreter(self):
         if self._interp:
@@ -439,8 +456,9 @@ class StateMachine:
             self.send({"type":"nack","id":cmd_id,"cmd":cmd,"reason":"unknown_cmd"}); return
         if cmd not in ALWAYS_ACCEPT:
             if ms.state not in COMMAND_STATES.get(cmd, set()):
-                reason = ("estop_active" if ms.state == State.ESTOPPED else
-                          "hw_fault"    if ms.state == State.FAULTED   else "not_ready")
+                reason = ("estop_active"  if ms.state == State.ESTOPPED   else
+                          "hw_fault"      if ms.state == State.FAULTED    else
+                          "calibrating"   if ms.state == State.CALIBRATING else "not_ready")
                 self.send({"type":"nack","id":cmd_id,"cmd":cmd,"reason":reason}); return
         handler = getattr(self, f"_cmd_{cmd}", None)
         if handler:
@@ -561,6 +579,16 @@ class StateMachine:
 
     def _cmd_get_param(self, i, m):
         k = m.get("key")
+        # Calibration params are stored separately from the general params dict.
+        cal_map = {
+            "steps_per_mm_x": "X",
+            "steps_per_mm_y": "Y",
+            "steps_per_mm_z": "Z",
+        }
+        if k in cal_map:
+            axis = cal_map[k]
+            val  = self.ms.steps_per_mm.get(axis, 0.0)
+            self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":val}); return
         if k not in self.ms.params:
             self.send({"type":"nack","id":i,"cmd":"get_param","reason":"invalid_param"}); return
         self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":self.ms.params[k]})
@@ -629,6 +657,29 @@ class StateMachine:
                                "servo_door":ms.servo_door,"servo_laser_btn":ms.servo_laser_btn},
                    "inputs":{"estop_hw":ms.estop_hw,"start_btn":ms.start_btn,"pause_btn":ms.pause_btn}})
 
+    def _cmd_calibrate_axis(self, i, m):
+        axis = str(m.get("axis", "X")).upper()
+        if axis not in ("X", "Y", "Z"):
+            self.send({"type":"nack","id":i,"cmd":"calibrate_axis","reason":"invalid_axis"}); return
+        self.ms.cal_axis = axis
+        self.ms.cal_raw_steps = 0
+        self.ms.set_state(State.CALIBRATING)
+        self._cal_done_at = time.monotonic() + 2.0   # 2s simulated traverse
+        self.send({"type":"ack","id":i,"cmd":"calibrate_axis"})
+
+    def _cmd_set_cal_distance(self, i, m):
+        if self.ms.cal_raw_steps == 0:
+            self.send({"type":"nack","id":i,"cmd":"set_cal_distance","reason":"traverse_not_done"}); return
+        dist = float(m.get("mm", 0))
+        if dist <= 0:
+            self.send({"type":"nack","id":i,"cmd":"set_cal_distance","reason":"invalid_distance"}); return
+        axis = self.ms.cal_axis or str(m.get("axis","X")).upper()
+        self.ms.steps_per_mm[axis] = self.ms.cal_raw_steps / dist
+        self.ms.cal_raw_steps = 0
+        self.ms.cal_axis = ""
+        self.ms.set_state(State.IDLE)
+        self.send({"type":"ack","id":i,"cmd":"set_cal_distance"})
+
     def _cmd_set_output(self, i, m):
         out,state = m.get("output",""), m.get("state")
         if out not in VALID_OUTPUTS or not isinstance(state, bool):
@@ -678,8 +729,10 @@ class StateMachine:
             "pickup_ok": ms.pickup_ok, "material_present": ms.material_present,
             "laser_safe": ms.laser_safe, "estop_hw": ms.estop_hw,
             "program_loaded": ms.stored_program is not None, "fault": ms.fault,
-            "current_op": ist.get('current_op'), "step_index": ist.get('step_index'),
-            "loop_iter":  ist.get('loop_iter'),  "variables":  ist.get('variables'),
+            "current_op": ist.get("current_op"), "step_index": ist.get("step_index"),
+            "loop_iter":  ist.get("loop_iter"),  "variables":  ist.get("variables"),
+            "cal_axis":  ms.cal_axis   if ms.cal_raw_steps > 0 else None,
+            "cal_steps": ms.cal_raw_steps if ms.cal_raw_steps > 0 else None,
         }
 
 

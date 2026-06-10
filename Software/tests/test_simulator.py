@@ -762,3 +762,162 @@ class TestSimulatedMachine:
         ev.set()
         with pytest.raises(ProgramFault, match="estop_triggered"):
             machine.delay(500, ev)
+
+
+
+# ===========================================================================
+# Stepper calibration
+# ===========================================================================
+
+def _complete_traverse(sm):
+    """Force the calibration traverse to complete (bypasses the real-time timer).
+    Mirrors the fake_steps dict in _tick_calibrating so tests see consistent values."""
+    fake_steps = {"X": 12800, "Y": 12800, "Z": 6400}
+    sm.ms.cal_raw_steps = fake_steps.get(sm.ms.cal_axis, 3200)
+    sm._cal_done_at = None
+
+
+class TestStepperCalibration:
+    """Tests for calibrate_axis / set_cal_distance / get_param calibration keys."""
+
+    # ---- command gating ----
+
+    def test_calibrate_axis_accepted_in_idle(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        assert only(msgs)["type"] == "ack"
+
+    def test_calibrate_axis_accepted_in_ready(self, sm):
+        sm.ms.set_state(State.READY)
+        msgs = step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "Y"})
+        assert only(msgs)["type"] == "ack"
+
+    def test_calibrate_axis_rejected_in_running(self, sm):
+        sm.ms.set_state(State.RUNNING)
+        msgs = step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "not_ready"
+
+    def test_calibrate_axis_rejected_with_bad_axis(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "Q"})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "invalid_axis"
+
+    def test_set_cal_distance_rejected_outside_calibrating(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "set_cal_distance", "axis": "X", "mm": 420.0})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "not_ready"
+
+    def test_command_rejected_during_calibrating_with_correct_reason(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        msgs = step(sm, {"id": 2, "cmd": "home"})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "calibrating"
+
+    # ---- state transitions ----
+
+    def test_calibrate_enters_calibrating_state(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        assert sm.ms.state == State.CALIBRATING
+
+    def test_calibrating_axis_stored(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "Z"})
+        assert sm.ms.cal_axis == "Z"
+
+    def test_traverse_completes_after_timer(self, sm, monkeypatch):
+        import time
+        t = [1000.0]
+        monkeypatch.setattr(time, "monotonic", lambda: t[0])
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        assert sm.ms.cal_raw_steps == 0   # traverse not done yet
+        t[0] = 1003.0
+        sm.tick()
+        assert sm.ms.cal_raw_steps > 0    # traverse complete
+        assert sm.ms.state == State.CALIBRATING  # still waiting for distance
+
+    def test_traverse_stores_axis_specific_steps(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "Z"})
+        _complete_traverse(sm)
+        assert sm.ms.cal_raw_steps == 6400   # Z gets a different fake count
+
+    def test_set_cal_distance_computes_steps_per_mm(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        _complete_traverse(sm)   # cal_raw_steps = 12800
+        msgs = step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "X", "mm": 160.0})
+        r = only(msgs)
+        assert r["type"] == "ack"
+        assert sm.ms.state == State.IDLE
+        assert sm.ms.steps_per_mm["X"] == pytest.approx(80.0)
+
+    def test_set_cal_distance_returns_to_idle(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "Y"})
+        _complete_traverse(sm)
+        step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "Y", "mm": 300.0})
+        assert sm.ms.state == State.IDLE
+
+    def test_set_cal_distance_rejects_before_traverse(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        # _cal_done_at is in the future; traverse not done yet
+        msgs = step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "X", "mm": 100.0})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "traverse_not_done"
+
+    def test_set_cal_distance_rejects_zero_distance(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        _complete_traverse(sm)
+        msgs = step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "X", "mm": 0.0})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "invalid_distance"
+
+    def test_axes_calibrated_independently(self, sm):
+        for axis in ("X", "Y", "Z"):
+            sm.ms.set_state(State.IDLE)
+            sm.ms.cal_axis = ""
+            sm.ms.cal_raw_steps = 0
+            sm._cal_done_at = None
+            step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": axis})
+            _complete_traverse(sm)
+            step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": axis, "mm": 100.0})
+        for axis in ("X", "Y", "Z"):
+            assert sm.ms.steps_per_mm[axis] > 0
+
+    # ---- status broadcast ----
+
+    def test_cal_fields_absent_when_not_calibrating(self, sm):
+        status = sm._build_status()
+        assert status.get("cal_axis") is None
+        assert status.get("cal_steps") is None
+
+    def test_cal_fields_present_after_traverse(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        _complete_traverse(sm)
+        status = sm._build_status()
+        assert status["cal_axis"] == "X"
+        assert status["cal_steps"] == 12800
+
+    def test_state_is_calibrating_in_status(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        status = sm._build_status()
+        assert status["state"] == "CALIBRATING"
+
+    # ---- get_param ----
+
+    def test_get_param_steps_per_mm_x_returns_value(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        _complete_traverse(sm)
+        step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "X", "mm": 200.0})
+        msgs = step(sm, {"id": 3, "cmd": "get_param", "key": "steps_per_mm_x"})
+        r = only(msgs, "get_param")
+        assert r["type"] == "ack"
+        assert r["value"] == pytest.approx(64.0)   # 12800 / 200
+
+    def test_get_param_returns_zero_before_calibration(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "get_param", "key": "steps_per_mm_y"})
+        r = only(msgs, "get_param")
+        assert r["type"] == "ack"
+        assert r["value"] == pytest.approx(0.0)

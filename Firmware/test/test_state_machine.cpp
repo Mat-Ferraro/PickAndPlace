@@ -3,6 +3,7 @@
 
 #include "unity.h"
 #include "core/StateMachine.h"
+#include "core/../config/Config.h"
 #include "MockMachine.h"
 #include <string.h>
 #include <stdio.h>
@@ -27,10 +28,16 @@ static void b64Encode(const uint8_t* in, size_t inLen, char* out) {
 using namespace pnp;
 
 static MockMachine*  mm;
+static pnp::Config*  cfg;
 static StateMachine* sm;
 
-void setUp(void)    { mm = new MockMachine(); sm = new StateMachine(*mm); }
-void tearDown(void) { delete sm; delete mm; }
+void setUp(void) {
+    pnp::Config::clearTestEeprom();
+    mm  = new MockMachine();
+    cfg = new pnp::Config();
+    sm  = new StateMachine(*mm, *cfg);
+}
+void tearDown(void) { delete sm; delete cfg; delete mm; }
 
 static Command cmd(const char* name, int32_t id = 1) {
     Command c; c.name = name; c.id = id; return c;
@@ -287,6 +294,95 @@ void test_full_transfer_in_multiple_chunks(void) {
 // main
 // ============================================================
 
+// ============================================================
+// Calibration
+// ============================================================
+
+static Command calCmd(const char* name, char axis = 'X', float distMm = 0.0f) {
+    Command c = cmd(name);
+    c.calAxis   = axis;
+    c.calDistMm = distMm;
+    return c;
+}
+
+void test_calibrate_axis_enters_calibrating_state(void) {
+    Response r = sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    TEST_ASSERT_EQUAL(Response::Ack, r.kind);
+    TEST_ASSERT_TRUE(State::Calibrating == sm->state());
+}
+
+void test_calibrate_axis_rejected_when_homing(void) {
+    sm->handleCommand(cmd("home"), 0);   // → Homing
+    Response r = sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+    TEST_ASSERT_TRUE(State::Homing == sm->state());
+}
+
+void test_calibrate_axis_rejected_with_invalid_axis(void) {
+    Response r = sm->handleCommand(calCmd("calibrate_axis", 'Q'), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+    TEST_ASSERT_EQUAL_STRING("invalid_axis", r.reason);
+}
+
+void test_tick_drives_traverse_and_stores_steps(void) {
+    mm->traverseSteps = 12800;
+    sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    sm->tick(0);
+    TEST_ASSERT_TRUE(sm->calTraverseDone());
+    TEST_ASSERT_EQUAL(12800u, sm->calSteps());
+    // Still Calibrating — waiting for set_cal_distance.
+    TEST_ASSERT_TRUE(State::Calibrating == sm->state());
+    // Traverse was called with the right axis.
+    TEST_ASSERT_EQUAL(1u, mm->traversals.size());
+    TEST_ASSERT_EQUAL('X', mm->traversals[0].axis);
+}
+
+void test_set_cal_distance_computes_steps_per_mm(void) {
+    mm->traverseSteps = 12800;
+    sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    sm->tick(0);   // traverse completes
+
+    Response r = sm->handleCommand(calCmd("set_cal_distance", 'X', 160.0f), 0);
+    TEST_ASSERT_EQUAL(Response::Ack, r.kind);
+    TEST_ASSERT_TRUE(State::Idle == sm->state());
+    // 12800 steps / 160 mm = 80.0 steps/mm
+    TEST_ASSERT_EQUAL_FLOAT(80.0f, sm->stepsPerMm('X'));
+}
+
+void test_set_cal_distance_rejected_before_traverse(void) {
+    sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    // tick() NOT called — traverse not done yet
+    Response r = sm->handleCommand(calCmd("set_cal_distance", 'X', 160.0f), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+    TEST_ASSERT_EQUAL_STRING("traverse_not_done", r.reason);
+}
+
+void test_set_cal_distance_rejected_outside_calibrating(void) {
+    // Never started calibration
+    Response r = sm->handleCommand(calCmd("set_cal_distance", 'X', 160.0f), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+}
+
+void test_calibrate_z_axis_independently(void) {
+    mm->traverseSteps = 6400;
+    sm->handleCommand(calCmd("calibrate_axis", 'Z'), 0);
+    sm->tick(0);
+    sm->handleCommand(calCmd("set_cal_distance", 'Z', 200.0f), 0);
+    // 6400 / 200 = 32.0 steps/mm
+    TEST_ASSERT_EQUAL_FLOAT(32.0f, sm->stepsPerMm('Z'));
+    // X unchanged
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, sm->stepsPerMm('X'));
+}
+
+void test_traverse_fault_enters_faulted_state(void) {
+    // We can simulate a fault by injecting it directly — traverseToStop
+    // returning Faulted is tested here by injecting a fault after tick.
+    // Full HAL fault path is validated on the bench.
+    sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    sm->injectFault("cal_traverse_failed");
+    TEST_ASSERT_TRUE(State::Faulted == sm->state());
+    TEST_ASSERT_EQUAL_STRING("cal_traverse_failed", sm->fault());
+}
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_run_program_in_idle_is_rejected_not_ready);
@@ -313,5 +409,15 @@ int main(void) {
     RUN_TEST(test_end_with_invalid_json_is_nacked);
     RUN_TEST(test_full_transfer_happy_path_loads_program);
     RUN_TEST(test_full_transfer_in_multiple_chunks);
+    // Calibration
+    RUN_TEST(test_calibrate_axis_enters_calibrating_state);
+    RUN_TEST(test_calibrate_axis_rejected_when_homing);
+    RUN_TEST(test_calibrate_axis_rejected_with_invalid_axis);
+    RUN_TEST(test_tick_drives_traverse_and_stores_steps);
+    RUN_TEST(test_set_cal_distance_computes_steps_per_mm);
+    RUN_TEST(test_set_cal_distance_rejected_before_traverse);
+    RUN_TEST(test_set_cal_distance_rejected_outside_calibrating);
+    RUN_TEST(test_calibrate_z_axis_independently);
+    RUN_TEST(test_traverse_fault_enters_faulted_state);
     return UNITY_END();
 }

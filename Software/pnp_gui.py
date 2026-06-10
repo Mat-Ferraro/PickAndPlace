@@ -107,6 +107,9 @@ class MainWindow(QMainWindow):
             self._send({"cmd": "query_status"})
             self._send({"cmd": "query_positions"})
             self._send({"cmd": "query_sensors"})
+            # Fetch persisted calibration values
+            for axis_key in ("steps_per_mm_x", "steps_per_mm_y", "steps_per_mm_z"):
+                self._send({"cmd": "get_param", "key": axis_key})
             self._sensor_timer.start(2000)   # poll sensors every 2 s
         else:
             self._event_log.append("SYSTEM", "Disconnected")
@@ -149,6 +152,8 @@ class MainWindow(QMainWindow):
         "estop":        "User: E-STOP pressed",
         "reset_fault":  "User: Fault reset",
         "reset_estop":  "User: E-Stop reset",
+        "calibrate_axis":    None,   # built dynamically
+        "set_cal_distance":  None,   # built dynamically
         "teach_position": None,   # built dynamically below
         "save_position":  None,
     }
@@ -157,7 +162,12 @@ class MainWindow(QMainWindow):
         if self._worker and self._worker.isRunning():
             verb = cmd.get("cmd", "")
             if verb in self._LOG_CMDS:
-                if verb == "teach_position":
+                if verb == "calibrate_axis":
+                    msg = f"User: Calibrate {cmd.get('axis','?')} axis started"
+                elif verb == "set_cal_distance":
+                    msg = (f"User: Cal distance set — "
+                           f"{cmd.get('axis','?')} = {cmd.get('mm',0):.1f} mm")
+                elif verb == "teach_position":
                     msg = f"User: Taught position '{cmd.get('name', '?')}'"
                 elif verb == "save_position":
                     msg = f"User: Saved position '{cmd.get('name', '?')}'"
@@ -226,6 +236,23 @@ class MainWindow(QMainWindow):
             elif cmd == "get_program":
                 program = msg.get("program", {})
                 self._prog_tab.on_program(program)
+            elif cmd == "get_param":
+                key   = msg.get("key", "")
+                value = msg.get("value")
+                if value is not None:
+                    axis_map = {
+                        "steps_per_mm_x": "X",
+                        "steps_per_mm_y": "Y",
+                        "steps_per_mm_z": "Z",
+                    }
+                    if key in axis_map:
+                        self._cal_tab.set_steps_per_mm(axis_map[key], float(value))
+            elif cmd == "calibrate_axis":
+                pass   # state updates via status broadcast
+            elif cmd == "set_cal_distance":
+                # Refresh calibration values after a successful set
+                for axis_key in ("steps_per_mm_x", "steps_per_mm_y", "steps_per_mm_z"):
+                    self._send({"cmd": "get_param", "key": axis_key})
             elif cmd in ("reset_fault", "reset_estop"):
                 self._last_fault = None   # allow next fault to log fresh
             elif cmd == "run_program":
@@ -248,6 +275,9 @@ class MainWindow(QMainWindow):
                 self._prog_tab.on_upload_nack(detail)
                 QMessageBox.warning(self, "Program Error",
                     f"Could not load program:\n{detail}")
+            elif cmd in ("calibrate_axis", "set_cal_distance"):
+                QMessageBox.warning(self, "Calibration Error",
+                    f"Calibration command failed:\n{reason}")
             self._status_bar.showMessage(
                 f"NACK  id={msg.get('id')}  cmd={cmd}  reason={reason}")
 

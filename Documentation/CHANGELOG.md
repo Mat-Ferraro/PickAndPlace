@@ -1,3 +1,139 @@
+## v1.1
+
+### GUI — stepper calibration workflow
+
+**`tab_service.py`:**
+- New full-width "Stepper Calibration" group added to the Service tab.
+- Three axes (X/Y/Z) show current `steps/mm` in green, or "Not calibrated"
+  in orange when zero.
+- "Calibrate Axis" button (enabled in IDLE/READY) sends `calibrate_axis`;
+  disabled during CALIBRATING to prevent re-triggering mid-traverse.
+- Distance-entry panel (hidden by default): appears automatically when
+  `on_status()` receives `state=CALIBRATING` with `cal_steps > 0`. Shows the
+  raw step count and prompts the operator to enter actual travel distance.
+- "Apply" button sends `set_cal_distance` and immediately updates the display
+  optimistically. Panel hides when state leaves CALIBRATING.
+- `_update_controls()` extended for CALIBRATING state with contextual hint text.
+- `set_steps_per_mm(axis, value)` public method — called from main window to
+  update the displayed values from `get_param` responses.
+
+**`pnp_gui.py`:**
+- `calibrate_axis` and `set_cal_distance` added to `_LOG_CMDS` with dynamic
+  messages (includes axis name and distance value).
+- On connect: queries `get_param steps_per_mm_x/y/z` to populate persisted
+  calibration values from firmware.
+- Ack handling: `get_param` responses for calibration keys call
+  `set_steps_per_mm()`; `set_cal_distance` ack re-queries all three to refresh.
+- Nack handling: calibration nacks show a `QMessageBox.warning`.
+- CALIBRATING state flows through status broadcast → tab update without any
+  special-case branching in the main window.
+
+### Simulator — stepper calibration support
+
+**`simulator.py`:**
+- `CALIBRATING` added to the `State` enum.
+- `calibrate_axis` gated to IDLE/READY; `set_cal_distance` gated to CALIBRATING.
+- `MachineState` gains `cal_axis`, `cal_raw_steps`, and `steps_per_mm` dict.
+- `_cmd_calibrate_axis`: sets CALIBRATING, stores axis, starts a 2-second
+  simulated traverse timer.
+- `_tick_calibrating`: when timer fires, populates `cal_raw_steps` with
+  axis-specific fake values (X/Y: 12800, Z: 6400); stays CALIBRATING
+  waiting for `set_cal_distance`.
+- `_cmd_set_cal_distance`: validates traverse complete and distance > 0,
+  computes `steps_per_mm = raw_steps / mm`, stores per axis, returns to IDLE.
+- `_cmd_get_param` extended: `steps_per_mm_x/y/z` keys return values from
+  `ms.steps_per_mm` dict; all other keys use the existing params dict.
+- `calibrating` added as a gating nack reason.
+- `_build_status` includes `cal_axis` and `cal_steps` when traverse is complete.
+
+### Tests
+
+- `tests/test_simulator.py` +20 tests (now 209 total):
+  `TestStepperCalibration` — command gating (idle/ready/running/bad axis),
+  state transitions (enter CALIBRATING, axis stored, traverse timing,
+  axis-specific step counts), `set_cal_distance` (compute, reject before
+  traverse, reject zero distance, return to IDLE), multi-axis independence,
+  status broadcast (cal fields absent/present), `get_param` for calibration
+  keys (before and after calibration).
+
+## v1.0
+
+### Firmware — core logic complete, host-tested
+
+**State machine (C++ port of `simulator.py`):**
+- 8-state enum (`State.h`): IDLE, HOMING, READY, RUNNING, PAUSED, FAULTED,
+  ESTOPPED, and new CALIBRATING state for automated steps/mm calibration.
+- Full command-gating table ported from Python `COMMAND_STATES` /
+  `ALWAYS_ACCEPT`. All gating decisions move string literals to flash via
+  `PNP_STREQ` chain (no table in SRAM).
+- Physical-button path (no-ack), hardware E-stop edge, fault injection all
+  ported and tested.
+
+**Interpreter (C++ port of `interpreter.py`):**
+- All 18 ops implemented: MOVE (with waypoints), PROBE_Z, HOME, OUTPUT,
+  READ_SENSOR, WAIT (with timeout/flip), DELAY, LOOP_FOR (`_loop_i`),
+  LOOP_WHILE (overflow guard), IF/else, CALL/RETURN (depth limit), SET_VAR
+  (expression evaluator), LOG ($var expansion), HALT, FAULT, JUMP (unsupported,
+  correct error), LABEL.
+- Condition evaluator: `true`/`false`, `not`, named sensors, `$var op rhs`.
+- Arithmetic evaluator: recursive descent (+, -, *, /, parentheses); no `eval`.
+- `AbortFlags` struct replaces `threading.Event` for pause/stop.
+
+**ProgramValidator (C++ port):**
+- Validates JSON structure, version, all required fields per op, CALL →
+  subroutine existence, nested bodies.
+- `kRequired` table eliminated — replaced with `PNP_STREQ` chain (saves ~450
+  bytes SRAM).
+- Accepts `JsonObjectConst` directly (no redundant second JSON parse).
+
+**ProgramStore — chunked transfer:**
+- `begin_transfer` / `program_chunk` (base64 decode) / `end_transfer`
+  (validate + store).
+- Raw JSON buffer is `malloc`'d in `beginTransfer`, freed immediately after
+  ArduinoJson parses it — zero BSS cost (was 2 KB static).
+- `const char*` input forces ArduinoJson to copy strings; document is
+  self-contained after free.
+
+**Calibration system:**
+- New `calibrate_axis` / `set_cal_distance` commands.
+- `IMachine::traverseToStop(axis, outSteps)` — drives axis to far hard stop
+  via StallGuard, returns raw step count.
+- `set_cal_distance` computes `steps_per_mm = raw_steps / mm`, stores in
+  `StateMachine::stepsPerMm_[3]`.
+- No mechanical spec knowledge needed — system measures itself.
+- Config/EEPROM persistence pending (next milestone).
+
+**SRAM optimisation (Arduino Mega, 8 KB total):**
+- Global variables: 7627 bytes (93%) → 2700 bytes (~33%) after all changes.
+- Key changes: heap-allocated transfer buffer, eliminated `kRequired` table,
+  `PNP_STREQ`/`PNP_SNPRINTF` PROGMEM macros throughout, `kMaxVars` 16 → 8.
+- `Platform.h` defines `PNP_STREQ` and `PNP_SNPRINTF`: `strcmp_P`/`snprintf_P`
+  + `PSTR` on AVR; `strcmp`/`snprintf` on host.
+
+**Host test suite:**
+- 101 tests, 0 failures (32 state machine + 69 interpreter/validator).
+- `cd Firmware/test && make` — builds two test binaries with g++/Unity against
+  vendored ArduinoJson and MockMachine.
+- All tests mutation-verified.
+
+**Arduino IDE compatibility fixes (AVR-GCC quirks):**
+- `Response` struct — added explicit constructor (no aggregate init with
+  default members in older dialect).
+- `strtof` not available in AVR libc — replaced with `(float)strtod`.
+- `<initializer_list>` not available on AVR — replaced range-for brace lists
+  with plain C array loops.
+- All PROGMEM string handling via `Platform.h` macros.
+
+**Documentation:**
+- `communication-protocol.md` updated to v1.0: CALIBRATING state, calibrate_axis
+  / set_cal_distance commands, new NACK reasons, cal_axis / cal_steps status
+  fields, updated state × command matrix.
+- `firmware-architecture.md` rewritten to reflect current state (was scaffold
+  docs from v0.9).
+- `open-decisions.md` updated: closed chunked transfer, pump driver, persistent
+  config architecture, steps/mm calibration mechanism; added ToF calibration,
+  re-calibration policy, Config/EEPROM implementation as new items.
+
 
 ## v0.9.3
 

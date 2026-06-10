@@ -6,9 +6,10 @@ in the architecture) lets the GUI be built and tested against a software simulat
 before hardware is available, with the same contract dropping onto real firmware
 later.
 
-> **Status:** v0.9 — Command set, state × command matrix, reason codes, and status
-> message fields are locked. Program execution model updated to reflect the
-> interpreter-based architecture (see `job-program.md`).
+> **Status:** v1.0 — Command set, state × command matrix, reason codes, and status
+> message fields are locked. `CALIBRATING` state and stepper calibration commands
+> added. Program execution model reflects the interpreter-based architecture
+> (see `job-program.md`).
 
 ---
 
@@ -45,6 +46,7 @@ via the `current_op` and `step_index` status fields.
 | `PAUSED` | Executor suspended at a safe point. Resumable. |
 | `FAULTED` | A fault has occurred. Operator intervention required. |
 | `ESTOPPED` | E-stop active. All motion stopped. |
+| `CALIBRATING` | Stepper calibration in progress. Two phases: (1) traverse to far hard stop, counting steps; (2) awaiting `set_cal_distance` from the GUI. |
 
 **State transition notes:**
 
@@ -54,12 +56,17 @@ via the `current_op` and `step_index` status fields.
 - `pause` during `RUNNING` → `PAUSED`. Executor suspends after the current
   atomic instruction completes.
 - `resume` from `PAUSED` → `RUNNING`. Executor continues from where it stopped.
-- Program `HALT` instruction → `READY`. Clean completion.
+- Program `HALT` instruction → `IDLE`. Clean completion.
 - Runtime fault or `FAULT` instruction → `FAULTED`. `reset_fault` → `IDLE`.
   Re-homing required before next run.
 - `ESTOPPED` is entered from any state when the hardware e-stop fires or a
   software `estop` command is received. `reset_estop` → `IDLE` (not `READY` —
   position trust is lost).
+- `calibrate_axis` → `CALIBRATING`. Firmware homes the axis, then drives it to
+  the far hard stop counting steps. Once the traverse completes, `cal_steps` in
+  the status broadcast becomes non-zero — the GUI should then prompt the operator
+  to enter the actual travel distance. `set_cal_distance` → `IDLE`. Position
+  trust is lost; re-home before running.
 
 ---
 
@@ -126,10 +133,6 @@ message.
 | `reset_fault` | — | Clear `FAULTED`. → `IDLE`. Re-home before next run. |
 | `reset_estop` | — | Clear `ESTOPPED` after hardware e-stop is released. → `IDLE`. |
 
-> **`start_job` is retired.** Use `run_program`. Job termination is controlled
-> by the program itself (typically `LOOP_WHILE material_present` ending with
-> `HALT`). There is no piece count argument.
-
 ### 4.2 Calibration and teaching
 
 | Command | Additional fields | Description |
@@ -140,12 +143,29 @@ message.
 | `query_positions` | — | Return all stored named positions with coordinates. ★ always valid. |
 | `move_to` | `x_mm`, `y_mm`, `z_mm` *(float)* | Move to absolute coordinates. `READY` only. |
 | `save_position` | `name` *(str)*, `x_mm`, `y_mm`, `z_mm` *(float)* | Store coordinates as a named position without moving. `IDLE` and `READY`. |
+| `calibrate_axis` | `axis` *(str: `"X"`, `"Y"`, or `"Z"`)* | Begin stepper calibration for one axis. Homes the axis, then drives to the far hard stop using StallGuard, counting steps. → `CALIBRATING`. `IDLE` and `READY` only. |
+| `set_cal_distance` | `axis` *(str)*, `mm` *(float)* | Supply the actual travel distance after a successful traverse. Firmware computes `steps_per_mm = raw_steps / mm`, saves to Config/EEPROM, and returns to `IDLE`. Only valid in `CALIBRATING` after traverse completes (`cal_steps > 0` in status). |
 
 **Named positions:** `home`, `laser_a`, `laser_b`, `deposit`.
 
-> **Note on teaching `home`:** the home position is normally established by the
-> homing sequence. Teaching it manually overrides the offset. Only do this
-> intentionally during calibration.
+**Calibration workflow:**
+
+```
+GUI sends:  {"cmd": "calibrate_axis", "axis": "X"}
+FW returns: {"type": "ack", "cmd": "calibrate_axis"}   ← traverse begins
+  ... status broadcasts show state=CALIBRATING, cal_steps=0 while traversing ...
+  ... traverse completes ...
+  ... status broadcasts show state=CALIBRATING, cal_axis="X", cal_steps=12800 ...
+GUI shows dialog: "Measured 12800 steps for X. Enter actual travel distance (mm):"
+Operator measures with calipers, types 420.
+GUI sends:  {"cmd": "set_cal_distance", "axis": "X", "mm": 420.0}
+FW returns: {"type": "ack", "cmd": "set_cal_distance"}
+  ... steps_per_mm = 12800 / 420.0 = 30.48, saved to EEPROM, state → IDLE ...
+```
+
+Calibration must be run once per axis on first install and after any mechanical
+change (belt replacement, pulley change). The computed `steps_per_mm` persists
+across power cycles in EEPROM.
 
 ### 4.3 Program loading (`load_program`)
 
@@ -162,53 +182,27 @@ sequence below, because standard lines are capped at 256 bytes (§1).
 **Chunked transfer (serialized program > 200 bytes):**
 
 Chunking uses three dedicated commands rather than repeated `load_program`
-messages. The raw program JSON is split into fragments of at most 128 bytes,
-each base64-encoded for transport.
+messages. The raw program JSON is split into fragments, each base64-encoded
+for transport.
 
 | Command | Fields | Description |
 |---|---|---|
 | `begin_transfer` | `name` *(str)*, `size` *(int)*, `chunks` *(int)* | Start a transfer. `size` is the raw payload length in bytes; `chunks` is the number of fragments to expect. Resets any in-progress transfer. |
 | `program_chunk` | `index` *(int)*, `data` *(str)* | One base64-encoded fragment. `index` must equal the number of chunks already accepted (strictly in order, 0-based). ACK echoes the accepted `index`. |
-| `end_transfer` | — | Finalize. Firmware concatenates the fragments, base64-decodes, checks the assembled length against `size`, then parses and validates the program. |
-
-```json
-{"type": "cmd", "id": 4, "cmd": "begin_transfer", "name": "demo", "size": 1180, "chunks": 10}
-{"type": "cmd", "id": 4, "cmd": "program_chunk", "index": 0, "data": "<base64 fragment>"}
-{"type": "cmd", "id": 4, "cmd": "program_chunk", "index": 1, "data": "<base64 fragment>"}
-{"type": "cmd", "id": 4, "cmd": "end_transfer"}
-```
+| `end_transfer` | — | Finalize. Firmware decodes, checks length against `size`, parses, and validates the program. |
 
 `begin_transfer` and each `program_chunk` receive their own ACK/NACK. The final
-result of the whole transfer is delivered as a single **`load_program`**
-ACK/NACK in response to `end_transfer` (not an `end_transfer` ACK), so a client
-sees the same completion message it would get from a single-part load.
+result is delivered as a **`load_program`** ACK/NACK in response to
+`end_transfer`.
 
 **Successful ACK (in response to `end_transfer`):**
 ```json
 {"type": "ack", "id": 4, "cmd": "load_program", "instructions": 24, "bytes": 1180}
 ```
 
-**Validation NACK:**
-```json
-{
-  "type":   "nack",
-  "id":     4,
-  "cmd":    "load_program",
-  "reason": "invalid_param",
-  "detail": "instruction 7: PROBE_Z missing required field 'store'"
-}
-```
-
 **Transfer-specific NACK reasons** (see also §6.1): `no_transfer_in_progress`,
 `out_of_order_expected_N`, `bad_base64`, `incomplete_R_of_C`, `size_mismatch`,
 and `json_error:<detail>`.
-
-> **Firmware note:** real firmware should discard a partially received transfer
-> if no further `program_chunk`/`end_transfer` arrives within a few seconds, to
-> avoid a wedged transfer buffer. The current simulator does not time a partial
-> transfer out — it retains the buffer until the next `begin_transfer` replaces
-> it. The simulator also tolerates a complete single-line `load_program` up to
-> 64 KB as a development convenience; firmware relies on chunking above 200 bytes.
 
 ### 4.4 Configuration
 
@@ -230,7 +224,13 @@ and `json_error:<detail>`.
 | `laser_interlock_mode` | 0 | Interlock source selection (see §4.6). |
 | `status_rate_hz` | 5 | Periodic status rate (2–10 Hz). |
 
-Full parameter key list to be defined when the persistent-config schema is locked.
+**Calibration params** (read-only via `get_param`; written only by `set_cal_distance`):
+
+| Key | Description |
+|---|---|
+| `steps_per_mm_x` | X-axis calibration (steps/mm). |
+| `steps_per_mm_y` | Y-axis calibration (steps/mm). |
+| `steps_per_mm_z` | Z-axis calibration (steps/mm). |
 
 ### 4.5 Service and diagnostics
 
@@ -238,7 +238,7 @@ Full parameter key list to be defined when the persistent-config schema is locke
 |---|---|---|
 | `query_status` | — | Request an immediate status message. ★ always valid. |
 | `query_sensors` | — | Request a full raw sensor dump. Returns once via ACK. |
-| `set_output` | `output` *(str)*, `state` *(bool)* | Manually toggle a named output. `IDLE` and `READY` only — program owns outputs during `RUNNING`. |
+| `set_output` | `output` *(str)*, `state` *(bool)* | Manually toggle a named output. `IDLE` and `READY` only. |
 | `set_servo` | `servo` *(str)*, `position` *(str)* | Move a servo to a named position. `IDLE` and `READY` only. |
 
 **Named outputs for `set_output`:** `pump`, `valve`.
@@ -270,37 +270,40 @@ Full parameter key list to be defined when the persistent-config schema is locke
 ## 5. State × command matrix
 
 ✓ = accepted. — = rejected (NACK `not_ready` in most states; `hw_fault` in
-FAULTED, `estop_active` in ESTOPPED — see §6.1). ★ = accepted in all states.
+FAULTED, `estop_active` in ESTOPPED, `calibrating` in CALIBRATING — see §6.1).
+★ = accepted in all states.
 
-| Command | IDLE | HOMING | READY | RUNNING | PAUSED | FAULTED | ESTOPPED |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `home` | ✓ | — | ✓ | — | — | — | — |
-| `load_program` | ✓ | — | ✓ | — | — | — | — |
-| `begin_transfer` | ✓ | — | ✓ | — | — | — | — |
-| `program_chunk` | ✓ | — | ✓ | — | — | — | — |
-| `end_transfer` | ✓ | — | ✓ | — | — | — | — |
-| `get_program` | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
-| `run_program` | — | — | ✓ | — | — | — | — |
-| `pause` | — | — | — | ✓ | — | — | — |
-| `resume` | — | — | — | — | ✓ | — | — |
-| `estop` | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
-| `reset_fault` | — | — | — | — | — | ✓ | — |
-| `reset_estop` | — | — | — | — | — | — | ✓ |
-| `jog` | — | — | ✓ | — | — | — | — |
-| `teach_position` | — | — | ✓ | — | — | — | — |
-| `query_position` | ✓ | — | ✓ | — | — | ✓ | ✓ |
-| `query_positions` | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
-| `move_to` | — | — | ✓ | — | — | — | — |
-| `save_position` | ✓ | — | ✓ | — | — | — | — |
-| `set_param` | ✓ | — | ✓ | — | — | — | — |
-| `get_param` | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
-| `save_config` | ✓ | — | ✓ | — | — | — | — |
-| `load_config` | ✓ | — | ✓ | — | — | — | — |
-| `query_status` | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
-| `query_sensors` | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `set_output` | ✓ | — | ✓ | — | — | — | — |
-| `set_servo` | ✓ | — | ✓ | — | — | — | — |
-| `laser_safe` | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
+| Command | IDLE | HOMING | READY | RUNNING | PAUSED | FAULTED | ESTOPPED | CALIBRATING |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `home` | ✓ | — | ✓ | — | — | — | — | — |
+| `load_program` | ✓ | — | ✓ | — | — | — | — | — |
+| `begin_transfer` | ✓ | — | ✓ | — | — | — | — | — |
+| `program_chunk` | ✓ | — | ✓ | — | — | — | — | — |
+| `end_transfer` | ✓ | — | ✓ | — | — | — | — | — |
+| `get_program` | ★ | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
+| `run_program` | — | — | ✓ | — | — | — | — | — |
+| `pause` | — | — | — | ✓ | — | — | — | — |
+| `resume` | — | — | — | — | ✓ | — | — | — |
+| `estop` | ★ | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
+| `reset_fault` | — | — | — | — | — | ✓ | — | — |
+| `reset_estop` | — | — | — | — | — | — | ✓ | — |
+| `jog` | — | — | ✓ | — | — | — | — | — |
+| `teach_position` | — | — | ✓ | — | — | — | — | — |
+| `query_position` | ✓ | — | ✓ | — | — | ✓ | ✓ | — |
+| `query_positions` | ★ | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
+| `move_to` | — | — | ✓ | — | — | — | — | — |
+| `save_position` | ✓ | — | ✓ | — | — | — | — | — |
+| `set_param` | ✓ | — | ✓ | — | — | — | — | — |
+| `get_param` | ★ | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
+| `save_config` | ✓ | — | ✓ | — | — | — | — | — |
+| `load_config` | ✓ | — | ✓ | — | — | — | — | — |
+| `query_status` | ★ | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
+| `query_sensors` | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| `set_output` | ✓ | — | ✓ | — | — | — | — | — |
+| `set_servo` | ✓ | — | ✓ | — | — | — | — | — |
+| `laser_safe` | ★ | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
+| `calibrate_axis` | ✓ | — | ✓ | — | — | — | — | — |
+| `set_cal_distance` | — | — | — | — | — | — | — | ✓ |
 
 ---
 
@@ -311,15 +314,20 @@ FAULTED, `estop_active` in ESTOPPED — see §6.1). ★ = accepted in all states
 | Reason | When used |
 |---|---|
 | `not_ready` | Command is valid but illegal in the current state. |
+| `calibrating` | Command rejected because the machine is `CALIBRATING`. |
 | `unknown_cmd` | `cmd` field not recognized. |
-| `malformed` | JSON failed to parse, or the `cmd` field is missing. (Missing or wrong-type command parameters are reported per-command as `invalid_param`.) |
-| `oversized` | Line exceeded the 256-byte limit (a single-line `load_program` may exceed this up to 64 KB; see §4.3). |
+| `malformed` | JSON failed to parse, or the `cmd` field is missing. |
+| `oversized` | Line exceeded the 256-byte limit. |
 | `missing_id` | No `id` field. NACK sent with `"id": null`. |
 | `invalid_param` | Key unknown, value out of range/wrong type, or program validation failure. |
+| `invalid_axis` | `calibrate_axis` received an axis other than `X`, `Y`, or `Z`. |
+| `invalid_distance` | `set_cal_distance` received a distance ≤ 0. |
+| `traverse_not_done` | `set_cal_distance` received before the calibration traverse completed. |
 | `estop_active` | Command rejected because e-stop is active (`ESTOPPED`). |
 | `hw_fault` | Command rejected because the machine is `FAULTED`, or `reset_estop` issued while the hardware e-stop is still held. |
 | `no_program` | `run_program` issued but no valid program is stored. |
-| `no_transfer_in_progress` | `program_chunk`/`end_transfer` received with no active transfer (§4.3). |
+| `buffer_full` | `begin_transfer` size exceeds the firmware's program buffer. |
+| `no_transfer_in_progress` | `program_chunk`/`end_transfer` received with no active transfer. |
 | `out_of_order_expected_N` | A `program_chunk` arrived with an unexpected `index`; N is the next expected index. |
 | `bad_base64` | A `program_chunk` `data` field failed base64 decoding. |
 | `incomplete_R_of_C` | `end_transfer` with fewer chunks received (R) than declared (C). |
@@ -339,6 +347,8 @@ FAULTED, `estop_active` in ESTOPPED — see §6.1). ★ = accepted in all states
 | `homing_failed` | Homing sequence did not find an endstop within travel limits. |
 | `motion_fault` | Unexpected limit hit or stall during travel. |
 | `laser_interlock` | Machine attempted laser workspace entry but interlock not met. |
+| `laser_not_parked` | Arm move attempted while laser head is not in park position. |
+| `cal_traverse_failed` | StallGuard did not trigger during calibration traverse (motor stalled or driver fault). |
 | `config_invalid` | EEPROM config failed CRC or schema version mismatch at boot. |
 | `estop_triggered` | Hardware e-stop input fired. |
 
@@ -346,18 +356,13 @@ FAULTED, `estop_active` in ESTOPPED — see §6.1). ★ = accepted in all states
 
 | Reason | Cause |
 |---|---|
-| `probe_failed`      | `PROBE_Z` did not detect a surface within `probe_max_depth_mm`. |
-| `pickup_lost`       | Pump ON + arm moving + all pickup ToF sensors (ch0–3) lost the object. Motion aborted immediately. |
-| `laser_not_parked`  | Arm move attempted or in progress while laser head not in park position (ToF ch4 out of range). Motion aborted. |
+| `probe_failed` | `PROBE_Z` did not detect a surface within `probe_max_depth_mm`. |
+| `pickup_lost` | Pump ON + arm moving + all pickup ToF sensors (ch0–3) lost the object. |
+| `laser_not_parked` | Arm move attempted while ToF ch4 reads out-of-range. |
 | `wait_timeout` | `WAIT` condition not met before `timeout_ms` elapsed. |
 | `loop_overflow` | A loop exceeded the 10,000-iteration safety limit. |
 | `call_depth` | Subroutine call depth exceeded 8 levels. |
 | `program_error` | Instruction field missing or undefined variable referenced at runtime. |
-| `no_material_at_start` | Program-defined fault — no material detected before job began. |
-
-The last entry is an example of a user-defined fault reason from a `FAULT`
-instruction. Any string is valid as a fault reason; the ones above are
-firmware-defined and have fixed meanings.
 
 ---
 
@@ -365,14 +370,13 @@ firmware-defined and have fixed meanings.
 
 ### 7.1 Periodic status message
 
-Emitted at 2–10 Hz (configurable). Carries aggregate state. Raw sensor detail
-goes in `query_sensors`.
+Emitted at 2–10 Hz (configurable). Carries aggregate state.
 
 | Field | Type | Description |
 |---|---|---|
 | `type` | str | Always `"status"`. |
 | `seq` | int | Incrementing sequence number. |
-| `uptime_ms` | int | Milliseconds since firmware boot. Detects reboots on reconnect. |
+| `uptime_ms` | int | Milliseconds since firmware boot. |
 | `state` | str | Current state (from §2). |
 | `position_name` | str or null | Named position if at one, otherwise null. |
 | `x_mm` | float | Current X position in mm. |
@@ -382,37 +386,14 @@ goes in `query_sensors`.
 | `material_present` | bool | TOF-6 detects remaining material. |
 | `laser_safe` | bool | Computed interlock result from active mode sources. |
 | `estop_hw` | bool | Hardware e-stop input state. |
-| `program_loaded` | bool | A valid program is stored in EEPROM (CRC + schema OK and passes validation). Gates `run_program` and the headless Start button; drives the program-loaded indicator. |
+| `program_loaded` | bool | A valid program is stored and passes validation. |
 | `fault` | str or null | Current fault reason, or null. |
 | `current_op` | str or null | `op` of the executing instruction. Non-null only during `RUNNING` / `PAUSED`. |
-| `step_index` | int or null | Flat instruction index in the program. Non-null only during `RUNNING` / `PAUSED`. |
-| `loop_iter` | int or null | Current iteration of the innermost active loop. Null when not in a loop. |
-| `variables` | object or null | Snapshot of all current program variables. Non-null only during `RUNNING` / `PAUSED`. |
-
-Example during a run:
-
-```json
-{
-  "type":             "status",
-  "seq":              142,
-  "uptime_ms":        34210,
-  "state":            "RUNNING",
-  "position_name":    null,
-  "x_mm":             100.5,
-  "y_mm":             50.0,
-  "z_mm":             28.3,
-  "pickup_ok":        true,
-  "material_present": true,
-  "laser_safe":       false,
-  "estop_hw":         false,
-  "program_loaded":   true,
-  "fault":            null,
-  "current_op":       "PROBE_Z",
-  "step_index":       8,
-  "loop_iter":        3,
-  "variables":        {"home_x": 100.0, "home_y": 50.0, "home_z": 28.3, "sheet_count": 3}
-}
-```
+| `step_index` | int or null | Flat instruction index. Non-null only during `RUNNING` / `PAUSED`. |
+| `loop_iter` | int or null | Current iteration of the innermost active loop. |
+| `variables` | object or null | Snapshot of all current program variables. |
+| `cal_axis` | str or null | Axis being calibrated (`"X"`, `"Y"`, `"Z"`), or null. Non-null only during `CALIBRATING` after traverse completes. |
+| `cal_steps` | int or null | Raw step count from the calibration traverse. Non-null and > 0 only after traverse completes. GUI should show the "enter distance" dialog when this is non-zero. |
 
 ### 7.2 `query_sensors` ACK
 
@@ -435,7 +416,7 @@ Example during a run:
 
 **`get_param`:**
 ```json
-{"type": "ack", "id": 4, "cmd": "get_param", "key": "laser_interlock_mode", "value": 0}
+{"type": "ack", "id": 4, "cmd": "get_param", "key": "steps_per_mm_x", "value": 80.0}
 ```
 
 **`query_positions`:**
@@ -451,30 +432,19 @@ Example during a run:
 }
 ```
 
-**`get_program`:**
-```json
-{"type": "ack", "id": 6, "cmd": "get_program", "program": { ... }}
-```
-
 ---
 
 ## 8. Protocol rules
 
 - Every validly framed command receives an ACK or NACK.
-- Malformed JSON, oversized lines, missing `id`/`cmd`, unknown commands, and
-  commands illegal in the current state are all rejected.
 - Status messages are periodic at 2–10 Hz (configurable via `set_param`).
-  Raw sensor dumps are reserved for explicit `query_sensors` requests.
-- Fault messages are emitted immediately and also reflected in the next status.
+- Fault messages are emitted immediately and reflected in the next status.
 - GUI command timeout: no ACK/NACK within 500–1000 ms → GUI marks timed out.
-  May retry read-only commands (`query_status`, `get_param`, `query_sensors`,
-  `query_position`, `query_positions`, `get_program`).
 - The GUI must tolerate USB disconnects and reconnects. On reconnect, send
   `query_status` then `get_program` before assuming state.
 - The firmware must not require a GUI connection to continue a running program.
 - GUI commands are requests. The firmware is the runtime authority.
-- `set_output` and `set_servo` are rejected during `RUNNING` — the program
-  executor owns outputs while running. Manual overrides must wait until `READY`.
+- `set_output` and `set_servo` are rejected during `RUNNING`.
 
 ---
 
@@ -482,21 +452,16 @@ Example during a run:
 
 Two independent items live in EEPROM:
 
-**Configuration** — machine calibration: home offsets, named position
-coordinates, sensor thresholds, servo angles, motion parameters. Managed via
-`set_param` / `save_config` / `load_config`. Loaded at boot. Updated
-infrequently.
+**Configuration** — machine calibration: `steps_per_mm` per axis, home offsets,
+named position coordinates, sensor thresholds, servo angles, motion parameters.
+Managed via `set_param` / `save_config` / `load_config` and written automatically
+after a successful `set_cal_distance`. Loaded at boot. Updated infrequently.
 
 **Job program** — the instruction sequence the executor runs. Uploaded via
 `load_program`, stored separately from config. Persists across power cycles so
-the machine can run headless without a GUI connection. Retrieved via
-`get_program`. The previously loaded program is always available for headless
-re-run after power-up.
+the machine can run headless. Retrieved via `get_program`.
 
-On first boot (no stored program): `run_program` NACKs with `no_program`.
-The GUI must upload a program before the machine can run.
-
-Both config and program include a schema version byte and CRC32. Invalid or
+Both config and program include a schema version byte and CRC16. Invalid or
 missing data falls back to safe defaults (config) or no-program state (program).
 
 ---
@@ -506,5 +471,4 @@ missing data falls back to safe defaults (config) or no-program state (program).
 A host-side Python interpreter (`ProgramInterpreter`) implements the job
 program execution model from `job-program.md`. The simulator wraps the
 interpreter in the safety layer and exposes it over TCP using this protocol.
-The interpreter is the reference implementation that later ports to C++ on
-the Mega.
+The interpreter is the reference implementation for the C++ port on the Mega.
