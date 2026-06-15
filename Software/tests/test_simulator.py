@@ -921,3 +921,93 @@ class TestStepperCalibration:
         r = only(msgs, "get_param")
         assert r["type"] == "ack"
         assert r["value"] == pytest.approx(0.0)
+
+
+# ===========================================================================
+# Sensor calibration
+# ===========================================================================
+
+class TestSensorCalibration:
+    """Tests for calibrate_sensors command and tof_offset get_param keys."""
+
+    # ---- gating ----
+
+    def test_calibrate_sensors_accepted_in_idle(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        assert only(msgs)["type"] == "ack"
+
+    def test_calibrate_sensors_accepted_in_ready(self, sm):
+        sm.ms.set_state(State.READY)
+        msgs = step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        assert only(msgs)["type"] == "ack"
+
+    def test_calibrate_sensors_rejected_in_running(self, sm):
+        sm.ms.set_state(State.RUNNING)
+        msgs = step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "not_ready"
+
+    # ---- reads current tof values ----
+
+    def test_calibrate_sensors_reads_ch0_to_ch3(self, sm):
+        sm.ms.tof_dist_mm = [45, 47, 46, 48, 30, 25]
+        msgs = step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        r = only(msgs)
+        assert r["type"] == "ack"
+        assert r["offsets"] == [45, 47, 46, 48]
+
+    def test_calibrate_sensors_does_not_include_ch4_ch5(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        r = only(msgs)
+        assert len(r["offsets"]) == 4
+
+    def test_calibrate_sensors_stores_offsets(self, sm):
+        sm.ms.tof_dist_mm = [45, 47, 46, 48, 30, 25]
+        step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        assert sm.ms.tof_offsets == [45, 47, 46, 48]
+
+    def test_recalibrate_overwrites_previous(self, sm):
+        sm.ms.tof_dist_mm = [45, 47, 46, 48, 30, 25]
+        step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        sm.ms.tof_dist_mm = [50, 51, 49, 52, 30, 25]
+        step(sm, {"id": 2, "cmd": "calibrate_sensors"})
+        assert sm.ms.tof_offsets == [50, 51, 49, 52]
+
+    # ---- get_param for tof offsets ----
+
+    def test_get_param_tof_offset_returns_none_before_cal(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "get_param", "key": "tof_offset_0"})
+        r = only(msgs, "get_param")
+        assert r["type"] == "ack"
+        assert r["value"] is None
+
+    def test_get_param_tof_offset_returns_stored_value(self, sm):
+        sm.ms.tof_dist_mm = [45, 47, 46, 48, 30, 25]
+        step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        for ch, expected in enumerate([45, 47, 46, 48]):
+            msgs = step(sm, {"id": ch + 2, "cmd": "get_param",
+                              "key": f"tof_offset_{ch}"})
+            r = only(msgs, "get_param")
+            assert r["value"] == expected, f"ch{ch}: expected {expected}, got {r['value']}"
+
+    def test_get_param_tof_offset_all_four_channels(self, sm):
+        sm.ms.tof_dist_mm = [40, 41, 42, 43, 30, 25]
+        step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        for ch in range(4):
+            msgs = step(sm, {"id": ch + 2, "cmd": "get_param",
+                              "key": f"tof_offset_{ch}"})
+            r = only(msgs, "get_param")
+            assert r["value"] == 40 + ch
+
+    # ---- status sensors (ch4/ch5) unaffected ----
+
+    def test_calibrate_sensors_does_not_change_ch4_reading(self, sm):
+        sm.ms.tof_dist_mm[4] = 30
+        step(sm, {"id": 1, "cmd": "calibrate_sensors"})
+        assert sm.ms.tof_dist_mm[4] == 30
+
+    # ---- initial offsets are None (not calibrated) ----
+
+    def test_initial_offsets_are_none(self, sm):
+        assert all(v is None for v in sm.ms.tof_offsets)

@@ -3,83 +3,61 @@
 #include <stddef.h>
 
 // EEPROM-backed machine configuration.
-//
-// Covers all values that must survive a power cycle:
-//   - steps_per_mm per axis (written by set_cal_distance)
-//   - servo open/closed angles
-//   - probe tuning parameters
-//
-// Layout: plain struct, CRC16 over all bytes preceding the crc field.
-// EEPROM I/O is Arduino-specific (EEPROM.h) and guarded by #ifdef ARDUINO.
-// On the host the same struct is read/written against a static byte array,
-// so the CRC, version-check, and round-trip logic are fully host-testable.
-//
-// Usage (Arduino):
-//   static Config config;
-//   config.load();           // at boot — populates fields from EEPROM or defaults
-//   // ... after calibration ...
-//   config.stepsPerMmX = 80.0f;
-//   config.save();           // persists to EEPROM
-//
-// Usage (host tests):
-//   Config::clearTestEeprom();   // wipe the fake EEPROM between tests
-//   Config cfg;
-//   cfg.save();  cfg.load();     // exercise round-trip
+// Schema v3: stepsPerMmY split into stepsPerMmY1 and stepsPerMmY2 to support
+// independent calibration of the dual-Y gantry motors (Y1 on Y socket,
+// Y2 on E0 socket). Both may differ slightly due to belt tension and assembly
+// tolerances; independent values avoid accumulated squareness error.
 
 namespace pnp {
 
 struct Config {
-    // ---- schema ----
-    static constexpr uint8_t  kVersion    = 1;
+    static constexpr uint8_t  kVersion    = 3;
     static constexpr uint16_t kEepromAddr = 0;
 
-    // ---- fields (in declaration order — CRC covers all of these) ----
-    uint8_t version        = kVersion;
+    uint8_t version = kVersion;
 
     // Stepper calibration (steps/mm). 0 = uncalibrated.
-    float   stepsPerMmX    = 0.0f;
-    float   stepsPerMmY    = 0.0f;
-    float   stepsPerMmZ    = 0.0f;
+    float stepsPerMmX  = 0.0f;
+    float stepsPerMmY1 = 0.0f;   // Y-axis, motor 1 (Y socket,  D60/61/56)
+    float stepsPerMmY2 = 0.0f;   // Y-axis, motor 2 (E0 socket, D26/28/24)
+    float stepsPerMmZ  = 0.0f;
+
+    // ToF sensor offset calibration (mm). Arm pickup channels ch0-ch3.
+    // -1.0 = not yet calibrated.
+    float tofOffsetMm[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
 
     // Servo angles (degrees).
-    float   servoDoorOpen        = 90.0f;
-    float   servoDoorClosed      =  0.0f;
-    float   servoLaserBtnPress   = 45.0f;
-    float   servoLaserBtnRelease =  0.0f;
+    float servoDoorOpen        = 90.0f;
+    float servoDoorClosed      =  0.0f;
+    float servoLaserBtnPress   = 45.0f;
+    float servoLaserBtnRelease =  0.0f;
 
-    // Probe tuning (mirrors interpreter.py config block defaults).
-    float   probeStepMm      =   0.5f;
-    float   probeMaxDepthMm  = 200.0f;
-    float   probeThreshMm    =  40.0f;
+    // Probe tuning.
+    float probeStepMm     =   0.5f;
+    float probeMaxDepthMm = 200.0f;
+    float probeThreshMm   =  40.0f;
 
-    // ---- CRC (must be last field) ----
+    // CRC must be last.
     uint16_t crc = 0;
 
-    // ---- API ----
-
-    // Load from EEPROM. Returns true if CRC and version are valid.
-    // On failure (first boot, corruption) fields are reset to defaults.
     bool load();
-
-    // Compute CRC, write struct to EEPROM.
     void save();
 
-    // True if all three axes have been calibrated (steps/mm > 0).
+    // True when all four drive axes are calibrated.
     bool isCalibrated() const {
-        return stepsPerMmX > 0.0f && stepsPerMmY > 0.0f && stepsPerMmZ > 0.0f;
+        return stepsPerMmX  > 0.0f && stepsPerMmY1 > 0.0f &&
+               stepsPerMmY2 > 0.0f && stepsPerMmZ  > 0.0f;
     }
-
-    // True if stored CRC matches the computed CRC and version is current.
+    bool isSensorCalibrated(uint8_t ch) const {
+        return ch < 4 && tofOffsetMm[ch] >= 0.0f;
+    }
     bool isValid() const;
-
-    // Helpers
     static uint16_t computeCrc(const uint8_t* data, size_t len);
     void            updateCrc();
 
 #ifndef ARDUINO
-    // Wipe the fake EEPROM between host tests.
     static void clearTestEeprom();
-    static constexpr size_t kFakeEepromSize = 64;
+    static constexpr size_t kFakeEepromSize = 128;
 #endif
 };
 

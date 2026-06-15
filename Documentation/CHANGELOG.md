@@ -1,3 +1,61 @@
+## v1.2
+
+### GUI — ToF sensor offset calibration
+
+**New `tab_sensor_cal.py` — `SensorCalTab`:**
+- New "Sensor Cal" tab between Service and Comms.
+- Arm sensors table (ch0–ch3): live reading, stored baseline, computed
+  clearance (live − baseline), and BLOCKED/CLEAR status per channel.
+- Touch threshold spinbox (default 10 mm): clearance ≤ threshold → BLOCKED (red),
+  otherwise CLEAR (green).
+- "Refresh Readings" button sends `query_sensors` on demand.
+- Calibration instructions panel + "Read Baseline" button → sends
+  `calibrate_sensors` command; ack populates baseline column and updates
+  the status label.
+- `set_baseline(ch, value)` method — called from main window after
+  `get_param tof_offset_N` to restore persisted baselines on connect.
+- Status sensors section (ch4–ch5): read-only display with PARKED/AWAY and
+  PRESENT/EMPTY labels; no calibration needed (threshold-based only).
+
+**`pnp_gui.py`:**
+- `SensorCalTab` added between Service and Comms tabs.
+- `calibrate_sensors` added to `_LOG_CMDS`.
+- `calibrate_sensors` ack routes to `sensor_cal_tab.on_cal_ack(offsets)` and
+  triggers an immediate `query_sensors` refresh.
+- `query_sensors` responses routed to `sensor_cal_tab.on_sensors()`.
+- On connect: queries `get_param tof_offset_0..3` to restore persisted
+  baselines; responses call `set_baseline(ch, value)`.
+
+### Simulator — sensor calibration support
+
+**`simulator.py`:**
+- `calibrate_sensors` added to `COMMAND_STATES` (IDLE/READY only).
+- `MachineState` gains `tof_offsets: list` (4 entries, initially `None`).
+- `_cmd_calibrate_sensors`: reads `ms.tof_dist_mm[0:4]`, stores in
+  `ms.tof_offsets`, returns `{"offsets": [...]}` in the ack. Does not
+  modify ch4 or ch5.
+- `_cmd_get_param` extended: `tof_offset_N` keys return the stored offset
+  for channel N (None if not yet calibrated).
+
+### Tests
+
+- `tests/test_simulator.py` +13 tests (now 221 total):
+  `TestSensorCalibration` — command gating (idle/ready/running), reads
+  ch0–ch3 from live tof values, excludes ch4/ch5, stores offsets, second
+  calibration overwrites first, `get_param` returns None before cal and
+  correct values after, all four channels independently verified, ch4
+  unchanged by calibration, initial offsets are None.
+
+### Design rationale (recorded for future HAL implementation)
+
+Clearance = live_reading − stored_baseline. When something blocks a
+recessed sensor at the baseline distance, clearance ≈ 0 → BLOCKED.
+When clear, the sensor reads the far wall and clearance >> 0 → CLEAR.
+pickup_ok (existing status field) is the aggregate of all 4 arm channels
+being BLOCKED simultaneously. The Config struct will need `tofOffsetMm[4]`
+alongside `stepsPerMm[3]` for EEPROM persistence — recorded in
+`open-decisions.md`.
+
 ## v1.1
 
 ### GUI — stepper calibration workflow

@@ -35,7 +35,8 @@ static uint8_t allowedStates(const char* name) {
                                                             stbit(State::Running)|stbit(State::Paused)|
                                                             stbit(State::Faulted)|stbit(State::Estopped));
     // Calibration commands
-    if (PNP_STREQ(name, "calibrate_axis"))  return uint8_t(stbit(State::Idle)|stbit(State::Ready));
+    if (PNP_STREQ(name, "calibrate_axis"))     return uint8_t(stbit(State::Idle)|stbit(State::Ready));
+    if (PNP_STREQ(name, "calibrate_sensors"))  return uint8_t(stbit(State::Idle)|stbit(State::Ready));
     if (PNP_STREQ(name, "set_cal_distance"))return stbit(State::Calibrating);
     return 0;
 }
@@ -53,19 +54,13 @@ static bool isAlwaysAccept(const char* name) {
 // Axis helpers
 // ============================================================
 
-int StateMachine::axisIndex(char axis) {
-    if (axis == 'X' || axis == 'x') return 0;
-    if (axis == 'Y' || axis == 'y') return 1;
-    if (axis == 'Z' || axis == 'z') return 2;
-    return -1;
-}
-
-float StateMachine::stepsPerMm(char axis) const {
-    switch (axisIndex(axis)) {
-        case 0: return config_.stepsPerMmX;
-        case 1: return config_.stepsPerMmY;
-        case 2: return config_.stepsPerMmZ;
-        default: return 0.0f;
+float StateMachine::stepsPerMm(CalAxis axis) const {
+    switch (axis) {
+        case CalAxis::X:  return config_.stepsPerMmX;
+        case CalAxis::Y1: return config_.stepsPerMmY1;
+        case CalAxis::Y2: return config_.stepsPerMmY2;
+        case CalAxis::Z:  return config_.stepsPerMmZ;
+        default:          return 0.0f;
     }
 }
 
@@ -137,7 +132,24 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
     const char* name = cmd.name;
 
     if (PNP_STREQ(name, "estop")) { setEstopHardware(true); return ack(cmd); }
-    if (isAlwaysAccept(name))       return ack(cmd);
+    if (isAlwaysAccept(name)) {
+        if (PNP_STREQ(name, "get_param")) {
+            Response r = ack(cmd);
+            const char* k = cmd.paramKey;
+            if      (PNP_STREQ(k, "steps_per_mm_x"))  { r.paramValue = config_.stepsPerMmX;  r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "steps_per_mm_y1")) { r.paramValue = config_.stepsPerMmY1; r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "steps_per_mm_y2")) { r.paramValue = config_.stepsPerMmY2; r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "steps_per_mm_z"))  { r.paramValue = config_.stepsPerMmZ;  r.hasParamValue = true; }
+            else if (k[0]=='t'&&k[1]=='o'&&k[2]=='f'&&k[3]=='_'
+                     &&k[4]=='o'&&k[5]=='f'&&k[6]=='f'&&k[7]=='s'
+                     &&k[10]=='_'&&k[11]>='0'&&k[11]<='3') {
+                uint8_t ch = (uint8_t)(k[11] - '0');
+                r.paramValue = config_.tofOffsetMm[ch]; r.hasParamValue = true;
+            }
+            return r;
+        }
+        return ack(cmd);
+    }
 
     uint8_t allowed = allowedStates(name);
     if (allowed == 0) return nack(cmd, "unknown_command");
@@ -174,8 +186,7 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
 
     // Calibration commands
     if (PNP_STREQ(name, "calibrate_axis")) {
-        int i = axisIndex(cmd.calAxis);
-        if (i < 0) return nack(cmd, "invalid_axis");
+        if (cmd.calAxis == CalAxis::Invalid) return nack(cmd, "invalid_axis");
         calAxis_         = cmd.calAxis;
         calRawSteps_     = 0;
         calTraverseDone_ = false;
@@ -186,14 +197,29 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
         if (!calTraverseDone_) return nack(cmd, "traverse_not_done");
         if (cmd.calDistMm <= 0.0f) return nack(cmd, "invalid_distance");
         float val = (float)calRawSteps_ / cmd.calDistMm;
-        switch (axisIndex(calAxis_)) {
-            case 0: config_.stepsPerMmX = val; break;
-            case 1: config_.stepsPerMmY = val; break;
-            case 2: config_.stepsPerMmZ = val; break;
+        switch (calAxis_) {
+            case CalAxis::X:  config_.stepsPerMmX  = val; break;
+            case CalAxis::Y1: config_.stepsPerMmY1 = val; break;
+            case CalAxis::Y2: config_.stepsPerMmY2 = val; break;
+            case CalAxis::Z:  config_.stepsPerMmZ  = val; break;
+            default: break;
         }
-        config_.save();     // persist to EEPROM
+        config_.save();
         state_ = State::Idle;
         return ack(cmd);
+    }
+
+    if (PNP_STREQ(name, "calibrate_sensors")) {
+        Response r = ack(cmd);
+        r.hasTofOffsets = true;
+        for (uint8_t ch = 0; ch < 4; ch++) {
+            float mm = 0.0f;
+            machine_.readDistanceMm(ch, mm);
+            config_.tofOffsetMm[ch] = mm;
+            r.tofOffsets[ch] = mm;
+        }
+        config_.save();
+        return r;
     }
 
     return ack(cmd);  // gated but not yet implemented
@@ -217,7 +243,7 @@ void StateMachine::tick(uint32_t nowMs) {
 
     // Drive the calibration traverse (blocking, same pattern as interpreter).
     if (state_ == State::Calibrating && !calTraverseDone_) {
-        OpResult r = machine_.traverseToStop(calAxis_, calRawSteps_);
+        OpResult r = machine_.traverseToStop(calAxisName(calAxis_), calRawSteps_);
         if (r == OpResult::Ok) {
             calTraverseDone_ = true;
             // Stay in Calibrating — waiting for set_cal_distance from the GUI.
@@ -258,7 +284,7 @@ StatusSnapshot StateMachine::buildStatus() const {
     return StatusSnapshot{
         state_, store_.programLoaded(), fault_,
         true, false, false, estopHw_,
-        calTraverseDone_ ? calAxis_ : (char)0,
+        calTraverseDone_ ? calAxisName(calAxis_) : (const char*)nullptr,
         calTraverseDone_ ? calRawSteps_ : 0u,
     };
 }

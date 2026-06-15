@@ -35,8 +35,10 @@ void Protocol::handleLine(const char* line, uint32_t nowMs) {
   }
 
   Command cmd;
-  cmd.name = doc["cmd"] | "";   // valid for the duration of this call
-  cmd.id   = doc["id"]  | -1;
+  cmd.name     = doc["cmd"] | "";
+  cmd.id       = doc["id"]  | -1;
+  cmd.paramKey = doc["key"] | "";
+  cmd.calAxis  = parseCalAxis(doc["axis"] | "X");
 
   Response r = sm_.handleCommand(cmd, nowMs);
   sendResponse(r);
@@ -50,6 +52,14 @@ void Protocol::sendResponse(const Response& r) {
   if (r.id >= 0) out["id"] = r.id;
   out["cmd"] = r.cmd;
   if (r.kind == Response::Nack) out["reason"] = r.reason;
+  if (r.hasParamValue) {
+      out["key"]   = r.cmd;   // echoed from cmd.paramKey via cmd.name path
+      out["value"] = r.paramValue;
+  }
+  if (r.hasTofOffsets) {
+      JsonArray arr = out["offsets"].to<JsonArray>();
+      for (int i = 0; i < 4; i++) arr.add(r.tofOffsets[i]);
+  }
   serializeJson(out, *io_);
   io_->println();
 }

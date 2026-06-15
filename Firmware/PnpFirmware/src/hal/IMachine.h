@@ -3,18 +3,12 @@
 
 namespace pnp {
 
-enum class OpResult : uint8_t {
-  Ok = 0,
-  Aborted,   // E-stop / pause asserted mid-operation
-  Faulted    // hardware fault (stall, sensor timeout, out of range, ...)
-};
-
+enum class OpResult : uint8_t { Ok = 0, Aborted, Faulted };
 struct Position { float x, y, z; };
 
 class IMachine {
  public:
   virtual ~IMachine() {}
-
   virtual Position getPosition() = 0;
   virtual OpResult moveTo(float x, float y, float z, uint8_t speedPct = 80) = 0;
   virtual OpResult probeZ(float x, float y, float approachZ, float stepMm,
@@ -25,10 +19,12 @@ class IMachine {
   virtual OpResult delayMs(uint32_t ms) = 0;
   virtual void     log(const char* msg) = 0;
 
-  // Drive axis to its far hard stop using StallGuard, counting steps.
-  // axis: 'X', 'Y', or 'Z'
-  // outSteps: raw step count of the full travel (used to compute steps/mm).
-  virtual OpResult traverseToStop(char axis, uint32_t& outSteps) = 0;
+  // Drive one axis to its far hard stop via StallGuard, counting steps.
+  // axis: "X", "Y1", "Y2", or "Z"  (Y1 = Y socket, Y2 = E0 socket)
+  virtual OpResult traverseToStop(const char* axis, uint32_t& outSteps) = 0;
+
+  // Read raw ToF distance for one arm pickup channel (0-3) in mm.
+  virtual OpResult readDistanceMm(uint8_t channel, float& outMm) = 0;
 };
 
 }  // namespace pnp

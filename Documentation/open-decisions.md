@@ -33,7 +33,12 @@ Live questions that are not yet settled. Move an item into the relevant doc
 - **Persistent config architecture** → Mega EEPROM. `Config` struct with
   `version` byte + CRC16. Load at boot, save after calibration. `#ifdef ARDUINO`
   guards on EEPROM I/O keep CRC logic host-testable. Implementation pending.
-- **Steps/mm calibration mechanism** → automated traverse. Firmware homes axis,
+- **Steps/mm calibration mechanism** → automated traverse.
+- **ToF sensor offset calibration mechanism** → GUI `calibrate_sensors` command.
+  Operator presses a flat surface against all 4 arm pickup holes; firmware reads
+  ch0–ch3 and stores as baselines. Clearance = live − baseline; clearance ≈ 0
+  → touching. GUI `Sensor Cal` tab shows live/baseline/clearance/status per
+  channel. `tofOffsetMm[4]` must be added to Config struct for EEPROM persistence. Firmware homes axis,
   drives to far hard stop via StallGuard, counts raw steps. User supplies actual
   travel distance via GUI. `steps_per_mm = raw_steps / distance_mm`. No need to
   know belt pitch, pulley count, or microstepping. See `firmware-architecture.md`.
@@ -52,8 +57,8 @@ Live questions that are not yet settled. Move an item into the relevant doc
 
 - **Config/EEPROM implementation** — architecture decided (see resolved above),
   code not yet written. Last host-testable firmware piece before bench work.
-  Includes: `steps_per_mm[3]`, servo angles, probe params, CRC16, schema version,
-  safe-defaults on invalid CRC. Also stores the loaded job program.
+  Includes: `steps_per_mm[3]`, `tof_offsets[4]`, servo angles, probe params,
+  CRC16, schema version, safe-defaults on invalid CRC. Also stores the loaded job program.
 
 ---
 
@@ -65,10 +70,9 @@ Live questions that are not yet settled. Move an item into the relevant doc
 - **TCA9548A pull-up wiring (if bare modules).** Select per-channel pull-up
   values using the datasheet Rp(min)/Rp(max) equations vs six-channel bus
   capacitance.
-- **ToF offset calibration.** Each VL53L0X sits some fixed distance above the
-  actual contact/surface point. That offset must be measured and subtracted from
-  `PROBE_Z` readings. VL53L0X also has built-in crosstalk compensation for covered
-  glass — needs to be run once per sensor on first install.
+- **ToF crosstalk compensation.** VL53L0X has a built-in crosstalk compensation
+  routine for covered glass — needs to be run once per sensor on first install.
+  Distinct from the offset/baseline calibration (now resolved — see below).
 
 ---
 

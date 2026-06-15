@@ -8,6 +8,31 @@
 
 namespace pnp {
 
+// Axis identifiers for calibration commands.
+// Y1 = Y socket (D60/61/56), Y2 = E0 socket (D26/28/24).
+enum class CalAxis : uint8_t { X=0, Y1=1, Y2=2, Z=3, Invalid=0xFF };
+
+// Parse an axis string ("X","Y1","Y","Y2","Z") to CalAxis.
+// "Y" maps to Y1 for backward compatibility.
+inline CalAxis parseCalAxis(const char* s) {
+    if (!s || !s[0]) return CalAxis::Invalid;
+    if (s[0]=='X' && !s[1])               return CalAxis::X;
+    if (s[0]=='Z' && !s[1])               return CalAxis::Z;
+    if (s[0]=='Y' && !s[1])               return CalAxis::Y1;  // legacy
+    if (s[0]=='Y' && s[1]=='1' && !s[2]) return CalAxis::Y1;
+    if (s[0]=='Y' && s[1]=='2' && !s[2]) return CalAxis::Y2;
+    return CalAxis::Invalid;
+}
+inline const char* calAxisName(CalAxis a) {
+    switch (a) {
+        case CalAxis::X:  return "X";
+        case CalAxis::Y1: return "Y1";
+        case CalAxis::Y2: return "Y2";
+        case CalAxis::Z:  return "Z";
+        default:          return "?";
+    }
+}
+
 struct Command {
   const char* name  = "";
   int32_t     id    = -1;
@@ -18,8 +43,11 @@ struct Command {
   uint16_t    index  = 0;
   const char* data   = "";
 
+  // get_param
+  const char* paramKey = "";
+
   // calibrate_axis / set_cal_distance
-  char        calAxis    = 'X';   // 'X', 'Y', or 'Z'
+  CalAxis     calAxis    = CalAxis::X;
   float       calDistMm  = 0.0f;
 };
 
@@ -31,6 +59,13 @@ struct Response {
   const char* reason;
   int         instrCount = 0;
   uint32_t    bytes      = 0;
+
+  // get_param response payload
+  bool        hasParamValue = false;
+  float       paramValue    = 0.0f;
+  // calibrate_sensors response payload
+  bool        hasTofOffsets = false;
+  float       tofOffsets[4] = {0,0,0,0};
 
   Response() : kind(None), id(-1), cmd(""), reason("") {}
   Response(Kind k, int32_t i, const char* c, const char* r)
@@ -46,7 +81,7 @@ struct StatusSnapshot {
   bool        laserSafe;
   bool        estopHw;
   // Calibration fields
-  char        calAxis;         // axis being calibrated (0 = none)
+  const char* calAxis;         // axis name being calibrated (nullptr = none)
   uint32_t    calSteps;        // raw steps from traverse (0 = traverse not done)
 };
 
@@ -67,7 +102,7 @@ class StateMachine {
   const char* fault()         const { return fault_; }
 
   // Calibration accessors (for tests and future Config wiring).
-  float    stepsPerMm(char axis) const;
+  float    stepsPerMm(CalAxis axis) const;
   uint32_t calSteps()            const { return calRawSteps_; }
   bool     calTraverseDone()     const { return calTraverseDone_; }
 
@@ -76,7 +111,6 @@ class StateMachine {
   static constexpr uint32_t kHomingMs = 3000;
 
  private:
-  static int   axisIndex(char axis);   // 'X'→0, 'Y'→1, 'Z'→2, else -1
   void         enterHoming(uint32_t nowMs);
   Response     handleTransferCommand(const Command& cmd);
   Response     ack(const Command& c)  const;
@@ -94,7 +128,7 @@ class StateMachine {
   uint32_t    homingDeadline_ = 0;
 
   // Calibration state
-  char     calAxis_         = 'X';
+  CalAxis  calAxis_         = CalAxis::Invalid;
   uint32_t calRawSteps_     = 0;
   bool     calTraverseDone_ = false;
   char     xferErr_[80] = {};

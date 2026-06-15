@@ -11,7 +11,8 @@ from gui_common import *
 from gui_worker import SerialWorker
 from tab_run import RunTab
 from tab_program import ProgramEditorTab
-from tab_service import CalibrationTab, ServiceTab
+from tab_service import ServiceTab, CommsTab
+from tab_calibration import CalibrationTab
 from tab_events import EventLog
 
 class MainWindow(QMainWindow):
@@ -59,11 +60,13 @@ class MainWindow(QMainWindow):
         self._prog_tab  = ProgramEditorTab()
         self._cal_tab   = CalibrationTab()
         self._svc_tab   = ServiceTab()
+        self._comms_tab = CommsTab()
         self._event_log = EventLog()
         self._tabs.addTab(self._run_tab,   "Run")
         self._tabs.addTab(self._prog_tab,  "Program")
-        self._tabs.addTab(self._cal_tab,   "Service")
-        self._tabs.addTab(self._svc_tab,   "Comms")
+        self._tabs.addTab(self._svc_tab,    "Service")
+        self._tabs.addTab(self._cal_tab,    "Calibration")
+        self._tabs.addTab(self._comms_tab,  "Comms")
         self._tabs.addTab(self._event_log, "Events")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self._tabs)
@@ -94,8 +97,8 @@ class MainWindow(QMainWindow):
             self._worker.message_received.connect(self._on_message)
             self._worker.connection_changed.connect(self._on_connection_changed)
             self._worker.error_occurred.connect(self._on_error)
-            self._worker.raw_tx.connect(self._svc_tab.log_tx)
-            self._worker.raw_rx.connect(self._svc_tab.log_rx)
+            self._worker.raw_tx.connect(self._comms_tab.log_tx)
+            self._worker.raw_rx.connect(self._comms_tab.log_rx)
             self._worker.connect_to(url)
             self._conn_btn.setText("Disconnect")
 
@@ -110,6 +113,8 @@ class MainWindow(QMainWindow):
             # Fetch persisted calibration values
             for axis_key in ("steps_per_mm_x", "steps_per_mm_y", "steps_per_mm_z"):
                 self._send({"cmd": "get_param", "key": axis_key})
+            for ch in range(4):
+                self._send({"cmd": "get_param", "key": f"tof_offset_{ch}"})
             self._sensor_timer.start(2000)   # poll sensors every 2 s
         else:
             self._event_log.append("SYSTEM", "Disconnected")
@@ -152,6 +157,7 @@ class MainWindow(QMainWindow):
         "estop":        "User: E-STOP pressed",
         "reset_fault":  "User: Fault reset",
         "reset_estop":  "User: E-Stop reset",
+        "calibrate_sensors": "User: Sensor baseline read",
         "calibrate_axis":    None,   # built dynamically
         "set_cal_distance":  None,   # built dynamically
         "teach_position": None,   # built dynamically below
@@ -216,11 +222,11 @@ class MainWindow(QMainWindow):
             cmd = msg.get("cmd", "")
             if cmd == "query_sensors":
                 self._cal_tab.on_sensors(msg)
-                self._svc_tab.on_sensors(msg)
+                self._comms_tab.on_sensors(msg)
             elif cmd == "query_positions":
-                self._cal_tab.on_positions(msg)
+                self._svc_tab.on_positions(msg)
             elif cmd in ("teach_position", "save_position"):
-                self._cal_tab.on_teach_ack()
+                self._svc_tab.on_teach_ack()
             elif cmd == "move_to":
                 pass
             elif cmd == "load_program":
@@ -247,6 +253,13 @@ class MainWindow(QMainWindow):
                     }
                     if key in axis_map:
                         self._cal_tab.set_steps_per_mm(axis_map[key], float(value))
+                    elif key.startswith("tof_offset_"):
+                        ch = int(key.split("_")[-1])
+                        self._cal_tab.set_baseline(ch, float(value))
+            elif cmd == "calibrate_sensors":
+                offsets = msg.get("offsets", [])
+                self._cal_tab.on_cal_ack(offsets)
+                self._send({"cmd": "query_sensors"})
             elif cmd == "calibrate_axis":
                 pass   # state updates via status broadcast
             elif cmd == "set_cal_distance":

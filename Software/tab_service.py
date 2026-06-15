@@ -20,18 +20,17 @@ class StatusLight(QLabel):
         r = self._size // 2
         self.setStyleSheet(
             f"background-color:{hex_c}; border-radius:{r}px;"
-            f"border:1px solid rgba(0,0,0,0.25);"
-        )
+            f"border:1px solid rgba(0,0,0,0.25);")
 
     def set_bool(self, value: bool, true_color="green", false_color="gray"):
         self.set_color(true_color if value else false_color)
 
 
 # ---------------------------------------------------------------------------
-# Service / calibration tab
+# Service tab — position control, named positions, servos, outputs
 # ---------------------------------------------------------------------------
 
-class CalibrationTab(QWidget):
+class ServiceTab(QWidget):
     command_requested = pyqtSignal(dict)
 
     def __init__(self, parent=None):
@@ -43,18 +42,12 @@ class CalibrationTab(QWidget):
         self._cur_x = 0.0
         self._cur_y = 0.0
         self._cur_z = 0.0
-        # Calibration state
-        self._cal_steps       = 0       # non-zero while awaiting distance input
-        self._cal_axis        = ""      # which axis is being calibrated
-        self._steps_per_mm    = {"X": 0.0, "Y": 0.0, "Z": 0.0}
         self._build_ui()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setSpacing(8)
-
-        # ---- Top half: left + right columns ----
-        top = QHBoxLayout()
+        top  = QHBoxLayout()
         top.setSpacing(8)
         left  = QVBoxLayout()
         right = QVBoxLayout()
@@ -109,9 +102,8 @@ class CalibrationTab(QWidget):
         self._btn_go = _btn("Go to Target", min_width=120)
         self._btn_go.setStyleSheet(
             "QPushButton { background-color:#2980b9; color:white; font-weight:bold; }"
-            " QPushButton:disabled { background-color: #bdc3c7; color: #888; font-weight: normal; }")
+            " QPushButton:disabled { background-color:#bdc3c7; color:#888; font-weight:normal; }")
         btn_reset = _btn("Reset to Current", min_width=120)
-        btn_reset.setToolTip("Copy current machine position into target fields")
         btn_reset.clicked.connect(self._reset_target_to_current)
         self._btn_go.clicked.connect(self._go_to_target)
         act_row.addWidget(self._btn_go)
@@ -134,9 +126,9 @@ class CalibrationTab(QWidget):
         in_grid.setSpacing(6)
         self._input_lights = {}
         for col, (key, label, t_col, f_col) in enumerate([
-            ("estop_hw",  "E-Stop HW", "red",    "green"),
-            ("start_btn", "Start Btn", "green",   "gray"),
-            ("pause_btn", "Pause Btn", "yellow",  "gray"),
+            ("estop_hw",  "E-Stop HW", "red",   "green"),
+            ("start_btn", "Start Btn", "green",  "gray"),
+            ("pause_btn", "Pause Btn", "yellow", "gray"),
         ]):
             light = StatusLight(14)
             self._input_lights[key] = (light, t_col, f_col)
@@ -145,7 +137,7 @@ class CalibrationTab(QWidget):
         left.addWidget(_group("Inputs", in_grid))
         left.addStretch()
 
-        # ---- Named positions table ----
+        # ---- Named positions ----
         self._pos_table = QTableWidget(len(NAMED_POSITIONS), 4)
         self._pos_table.setHorizontalHeaderLabels(["Position", "X", "Y", "Z"])
         self._pos_table.horizontalHeader().setSectionResizeMode(
@@ -166,10 +158,6 @@ class CalibrationTab(QWidget):
         teach_row.addWidget(self._teach_combo)
         self._btn_teach_current = _btn("Teach Current")
         self._btn_teach_target  = _btn("Teach Target")
-        self._btn_teach_current.setToolTip(
-            "Save the machine's current coordinates as the selected position")
-        self._btn_teach_target.setToolTip(
-            "Save the target coordinates as the selected position (no motion)")
         teach_row.addWidget(self._btn_teach_current)
         teach_row.addWidget(self._btn_teach_target)
         teach_row.addStretch()
@@ -198,14 +186,10 @@ class CalibrationTab(QWidget):
         self._btn_laser_release = _btn("Release", min_width=80)
         servo_grid.addWidget(self._btn_laser_press,   1, 1)
         servo_grid.addWidget(self._btn_laser_release, 1, 2)
-        self._btn_door_open.clicked.connect(
-            lambda: self._send_servo("door", "open"))
-        self._btn_door_close.clicked.connect(
-            lambda: self._send_servo("door", "closed"))
-        self._btn_laser_press.clicked.connect(
-            lambda: self._send_servo("laser_btn", "press"))
-        self._btn_laser_release.clicked.connect(
-            lambda: self._send_servo("laser_btn", "release"))
+        self._btn_door_open.clicked.connect(lambda: self._send_servo("door", "open"))
+        self._btn_door_close.clicked.connect(lambda: self._send_servo("door", "closed"))
+        self._btn_laser_press.clicked.connect(lambda: self._send_servo("laser_btn", "press"))
+        self._btn_laser_release.clicked.connect(lambda: self._send_servo("laser_btn", "release"))
         right.addWidget(_group("Servo Test", servo_grid))
 
         # ---- Output test ----
@@ -221,99 +205,16 @@ class CalibrationTab(QWidget):
         self._btn_valve_off = _btn("OFF", min_width=80)
         out_grid.addWidget(self._btn_valve_on,  1, 1)
         out_grid.addWidget(self._btn_valve_off, 1, 2)
-        self._btn_pump_on.clicked.connect(
-            lambda: self._send_output("pump", True))
-        self._btn_pump_off.clicked.connect(
-            lambda: self._send_output("pump", False))
-        self._btn_valve_on.clicked.connect(
-            lambda: self._send_output("valve", True))
-        self._btn_valve_off.clicked.connect(
-            lambda: self._send_output("valve", False))
+        self._btn_pump_on.clicked.connect(lambda: self._send_output("pump", True))
+        self._btn_pump_off.clicked.connect(lambda: self._send_output("pump", False))
+        self._btn_valve_on.clicked.connect(lambda: self._send_output("valve", True))
+        self._btn_valve_off.clicked.connect(lambda: self._send_output("valve", False))
         right.addWidget(_group("Output Test", out_grid))
         right.addStretch()
 
-        # ---- Stepper Calibration (full-width, below both columns) ----
-        root.addWidget(self._build_stepper_cal_group())
         self._apply_output_states({})
 
-    def _build_stepper_cal_group(self) -> QWidget:
-        """Full-width stepper calibration panel."""
-        cal_v = QVBoxLayout()
-        cal_v.setSpacing(8)
-
-        # --- Current steps/mm display ---
-        vals_row = QHBoxLayout()
-        vals_row.setSpacing(20)
-        self._spm_labels: dict[str, QLabel] = {}
-        for axis in ("X", "Y", "Z"):
-            lbl = QLabel("—")
-            lbl.setStyleSheet("font-weight:bold; font-size:13px;")
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            axis_box = QVBoxLayout()
-            axis_box.addWidget(QLabel(f"{axis} axis"), alignment=Qt.AlignmentFlag.AlignCenter)
-            axis_box.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignCenter)
-            self._spm_labels[axis] = lbl
-            vals_row.addLayout(axis_box)
-        vals_row.addStretch()
-        cal_v.addLayout(vals_row)
-        self._update_spm_display()
-
-        # --- Trigger row ---
-        trig_row = QHBoxLayout()
-        trig_row.setSpacing(8)
-        trig_row.addWidget(QLabel("Axis:"))
-        self._cal_axis_combo = QComboBox()
-        self._cal_axis_combo.addItems(["X", "Y", "Z"])
-        self._cal_axis_combo.setFixedWidth(60)
-        trig_row.addWidget(self._cal_axis_combo)
-        self._btn_calibrate = _btn("Calibrate Axis", min_width=130)
-        self._btn_calibrate.setToolTip(
-            "Home the axis, then drive to the far hard stop counting steps.\n"
-            "You will be prompted to enter the actual travel distance.")
-        self._btn_calibrate.clicked.connect(self._start_calibrate)
-        trig_row.addWidget(self._btn_calibrate)
-        trig_row.addStretch()
-        cal_v.addLayout(trig_row)
-
-        # --- Distance-entry panel (hidden until traverse complete) ---
-        self._dist_frame = QFrame()
-        self._dist_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        self._dist_frame.setStyleSheet(
-            "QFrame { background:#fef9e7; border:1px solid #f39c12; border-radius:4px; }")
-        dist_v = QVBoxLayout(self._dist_frame)
-        dist_v.setSpacing(6)
-        self._cal_info_lbl = QLabel("")
-        self._cal_info_lbl.setWordWrap(True)
-        self._cal_info_lbl.setStyleSheet("font-weight:bold;")
-        dist_v.addWidget(self._cal_info_lbl)
-
-        instr_lbl = QLabel(
-            "Measure the actual travel distance with calipers and enter it below.")
-        instr_lbl.setWordWrap(True)
-        dist_v.addWidget(instr_lbl)
-
-        dist_row = QHBoxLayout()
-        dist_row.addWidget(QLabel("Travel distance (mm):"))
-        self._dist_spin = QDoubleSpinBox()
-        self._dist_spin.setRange(1.0, 2000.0)
-        self._dist_spin.setDecimals(1)
-        self._dist_spin.setValue(100.0)
-        self._dist_spin.setFixedWidth(100)
-        dist_row.addWidget(self._dist_spin)
-        self._btn_apply_cal = _btn("Apply", min_width=80)
-        self._btn_apply_cal.setStyleSheet(
-            "QPushButton { background-color:#27ae60; color:white; font-weight:bold; }"
-            " QPushButton:disabled { background-color:#bdc3c7; color:#888; }")
-        self._btn_apply_cal.clicked.connect(self._apply_cal_distance)
-        dist_row.addWidget(self._btn_apply_cal)
-        dist_row.addStretch()
-        dist_v.addLayout(dist_row)
-        self._dist_frame.setVisible(False)
-        cal_v.addWidget(self._dist_frame)
-
-        return _group("Stepper Calibration", cal_v)
-
-    # ---- Data update methods ---------------------------------------------
+    # ---- Data update methods ----
 
     def on_status(self, msg: dict):
         self._state = msg.get("state", "IDLE")
@@ -324,24 +225,6 @@ class CalibrationTab(QWidget):
         self._lbl_y.setText(f"{self._cur_y:.2f}")
         self._lbl_z.setText(f"{self._cur_z:.2f}")
         self._lbl_name.setText(msg.get("position_name") or "—")
-
-        # Calibration state from status broadcast
-        cal_steps = msg.get("cal_steps") or 0
-        cal_axis  = msg.get("cal_axis")  or ""
-
-        if self._state == "CALIBRATING" and cal_steps > 0 and not self._dist_frame.isVisible():
-            # Traverse just completed — show distance entry panel
-            self._cal_steps = cal_steps
-            self._cal_axis  = cal_axis
-            self._cal_info_lbl.setText(
-                f"Traverse complete: {cal_steps:,} steps measured on {cal_axis} axis.")
-            self._dist_frame.setVisible(True)
-        elif self._state != "CALIBRATING":
-            # Left calibrating state — hide the panel
-            self._dist_frame.setVisible(False)
-            self._cal_steps = 0
-            self._cal_axis  = ""
-
         self._update_controls()
 
     def on_sensors(self, msg: dict):
@@ -363,41 +246,7 @@ class CalibrationTab(QWidget):
     def on_teach_ack(self):
         self.command_requested.emit({"cmd": "query_positions"})
 
-    def set_steps_per_mm(self, axis: str, value: float):
-        """Update the displayed steps/mm for one axis (called from main window)."""
-        if axis in self._steps_per_mm:
-            self._steps_per_mm[axis] = value
-            self._update_spm_display()
-
-    # ---- Stepper calibration helpers ------------------------------------
-
-    def _update_spm_display(self):
-        for axis, lbl in self._spm_labels.items():
-            val = self._steps_per_mm.get(axis, 0.0)
-            if val > 0:
-                lbl.setText(f"{val:.2f} steps/mm")
-                lbl.setStyleSheet("font-weight:bold; font-size:13px; color:#27ae60;")
-            else:
-                lbl.setText("Not calibrated")
-                lbl.setStyleSheet("font-weight:bold; font-size:13px; color:#e67e22;")
-
-    def _start_calibrate(self):
-        axis = self._cal_axis_combo.currentText()
-        self.command_requested.emit({"cmd": "calibrate_axis", "axis": axis})
-
-    def _apply_cal_distance(self):
-        dist = self._dist_spin.value()
-        axis = self._cal_axis or self._cal_axis_combo.currentText()
-        self.command_requested.emit({
-            "cmd":  "set_cal_distance",
-            "axis": axis,
-            "mm":   dist,
-        })
-        # Optimistically update display — firmware will confirm via EEPROM
-        if self._cal_steps > 0 and dist > 0:
-            self.set_steps_per_mm(axis, self._cal_steps / dist)
-
-    # ---- Helpers ---------------------------------------------------------
+    # ---- Helpers ----
 
     def _populate_pos_table(self):
         for row, name in enumerate(NAMED_POSITIONS):
@@ -410,8 +259,8 @@ class CalibrationTab(QWidget):
     def _apply_output_states(self, outputs: dict):
         door  = outputs.get("servo_door",      "closed")
         laser = outputs.get("servo_laser_btn", "release")
-        pump  = outputs.get("pump",            False)
-        valve = outputs.get("valve",           False)
+        pump  = outputs.get("pump",  False)
+        valve = outputs.get("valve", False)
         _style_btn(self._btn_door_open,     door  == "open",    "door_open")
         _style_btn(self._btn_door_close,    door  == "closed",  "door_closed")
         _style_btn(self._btn_laser_press,   laser == "press",   "laser_press")
@@ -435,74 +284,49 @@ class CalibrationTab(QWidget):
 
     def _go_to_target(self):
         self.command_requested.emit({
-            "cmd":  "move_to",
-            "x_mm": self._tgt["X"],
-            "y_mm": self._tgt["Y"],
-            "z_mm": self._tgt["Z"],
+            "cmd": "move_to",
+            "x_mm": self._tgt["X"], "y_mm": self._tgt["Y"], "z_mm": self._tgt["Z"],
         })
 
     def _teach_current(self):
         self.command_requested.emit({
-            "cmd": "teach_position",
-            "name": self._teach_combo.currentText(),
-        })
+            "cmd": "teach_position", "name": self._teach_combo.currentText()})
 
     def _teach_target(self):
         name = self._teach_combo.currentText()
         self.command_requested.emit({
-            "cmd":  "save_position",
-            "name": name,
-            "x_mm": self._tgt["X"],
-            "y_mm": self._tgt["Y"],
-            "z_mm": self._tgt["Z"],
+            "cmd": "save_position", "name": name,
+            "x_mm": self._tgt["X"], "y_mm": self._tgt["Y"], "z_mm": self._tgt["Z"],
         })
 
     def _send_servo(self, servo: str, position: str):
         self._current_outputs[f"servo_{servo}"] = position
         self._apply_output_states(self._current_outputs)
-        self.command_requested.emit(
-            {"cmd": "set_servo", "servo": servo, "position": position})
+        self.command_requested.emit({"cmd": "set_servo", "servo": servo, "position": position})
 
     def _send_output(self, output: str, state: bool):
         self._current_outputs[output] = state
         self._apply_output_states(self._current_outputs)
-        self.command_requested.emit(
-            {"cmd": "set_output", "output": output, "state": state})
-
-    # ---- Control enable/disable -----------------------------------------
+        self.command_requested.emit({"cmd": "set_output", "output": output, "state": state})
 
     def _update_controls(self):
-        calibrating = self._state == "CALIBRATING"
         can_act = self._connected and self._state == "READY"
         can_io  = self._connected and self._state in ("IDLE", "READY")
-        can_cal = self._connected and self._state in ("IDLE", "READY")
-
         self._btn_go.setEnabled(can_act)
-        self._btn_calibrate.setEnabled(can_cal)
-        self._cal_axis_combo.setEnabled(can_cal)
-        self._btn_apply_cal.setEnabled(
-            calibrating and self._cal_steps > 0 and self._connected)
-
         for btn in self._teach_btns.values():
             btn.setEnabled(can_act or
                            (self._connected and self._state == "IDLE"
                             and btn is self._btn_teach_target))
         for btn in [
-            self._btn_door_open,   self._btn_door_close,
+            self._btn_door_open, self._btn_door_close,
             self._btn_laser_press, self._btn_laser_release,
-            self._btn_pump_on,     self._btn_pump_off,
-            self._btn_valve_on,    self._btn_valve_off,
+            self._btn_pump_on, self._btn_pump_off,
+            self._btn_valve_on, self._btn_valve_off,
         ]:
             btn.setEnabled(can_io)
 
         if not self._connected:
             hint = "Not connected to machine."
-        elif calibrating:
-            if self._cal_steps > 0:
-                hint = (f"Calibrating {self._cal_axis}: traverse complete. "
-                        f"Enter travel distance and click Apply.")
-            else:
-                hint = f"Calibrating {self._cal_axis_combo.currentText()}: traversing to far stop…"
         elif self._state == "IDLE":
             hint = "Press Home on the Run tab to enable Go to Target and Teach Current."
         elif self._state == "HOMING":
@@ -519,10 +343,10 @@ class CalibrationTab(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Service tab  (ToF detail + comms log)
+# Comms tab — ToF sensor detail + serial log
 # ---------------------------------------------------------------------------
 
-class ServiceTab(QWidget):
+class CommsTab(QWidget):
     command_requested = pyqtSignal(dict)
 
     def __init__(self, parent=None):

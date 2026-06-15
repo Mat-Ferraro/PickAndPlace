@@ -298,7 +298,7 @@ void test_full_transfer_in_multiple_chunks(void) {
 // Calibration
 // ============================================================
 
-static Command calCmd(const char* name, char axis = 'X', float distMm = 0.0f) {
+static Command calCmd(const char* name, CalAxis axis = CalAxis::X, float distMm = 0.0f) {
     Command c = cmd(name);
     c.calAxis   = axis;
     c.calDistMm = distMm;
@@ -306,27 +306,28 @@ static Command calCmd(const char* name, char axis = 'X', float distMm = 0.0f) {
 }
 
 void test_calibrate_axis_enters_calibrating_state(void) {
-    Response r = sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    Response r = sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
     TEST_ASSERT_EQUAL(Response::Ack, r.kind);
     TEST_ASSERT_TRUE(State::Calibrating == sm->state());
 }
 
 void test_calibrate_axis_rejected_when_homing(void) {
     sm->handleCommand(cmd("home"), 0);   // → Homing
-    Response r = sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    Response r = sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
     TEST_ASSERT_EQUAL(Response::Nack, r.kind);
     TEST_ASSERT_TRUE(State::Homing == sm->state());
 }
 
 void test_calibrate_axis_rejected_with_invalid_axis(void) {
-    Response r = sm->handleCommand(calCmd("calibrate_axis", 'Q'), 0);
+    Command c = cmd("calibrate_axis"); c.calAxis = CalAxis::Invalid;
+    Response r = sm->handleCommand(c, 0);
     TEST_ASSERT_EQUAL(Response::Nack, r.kind);
     TEST_ASSERT_EQUAL_STRING("invalid_axis", r.reason);
 }
 
 void test_tick_drives_traverse_and_stores_steps(void) {
     mm->traverseSteps = 12800;
-    sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
     sm->tick(0);
     TEST_ASSERT_TRUE(sm->calTraverseDone());
     TEST_ASSERT_EQUAL(12800u, sm->calSteps());
@@ -334,55 +335,166 @@ void test_tick_drives_traverse_and_stores_steps(void) {
     TEST_ASSERT_TRUE(State::Calibrating == sm->state());
     // Traverse was called with the right axis.
     TEST_ASSERT_EQUAL(1u, mm->traversals.size());
-    TEST_ASSERT_EQUAL('X', mm->traversals[0].axis);
+    TEST_ASSERT_EQUAL_STRING("X", mm->traversals[0].axis.c_str());
 }
 
 void test_set_cal_distance_computes_steps_per_mm(void) {
     mm->traverseSteps = 12800;
-    sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
     sm->tick(0);   // traverse completes
 
-    Response r = sm->handleCommand(calCmd("set_cal_distance", 'X', 160.0f), 0);
+    Response r = sm->handleCommand(calCmd("set_cal_distance", CalAxis::X, 160.0f), 0);
     TEST_ASSERT_EQUAL(Response::Ack, r.kind);
     TEST_ASSERT_TRUE(State::Idle == sm->state());
     // 12800 steps / 160 mm = 80.0 steps/mm
-    TEST_ASSERT_EQUAL_FLOAT(80.0f, sm->stepsPerMm('X'));
+    TEST_ASSERT_EQUAL_FLOAT(80.0f, sm->stepsPerMm(CalAxis::X));
 }
 
 void test_set_cal_distance_rejected_before_traverse(void) {
-    sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
     // tick() NOT called — traverse not done yet
-    Response r = sm->handleCommand(calCmd("set_cal_distance", 'X', 160.0f), 0);
+    Response r = sm->handleCommand(calCmd("set_cal_distance", CalAxis::X, 160.0f), 0);
     TEST_ASSERT_EQUAL(Response::Nack, r.kind);
     TEST_ASSERT_EQUAL_STRING("traverse_not_done", r.reason);
 }
 
 void test_set_cal_distance_rejected_outside_calibrating(void) {
     // Never started calibration
-    Response r = sm->handleCommand(calCmd("set_cal_distance", 'X', 160.0f), 0);
+    Response r = sm->handleCommand(calCmd("set_cal_distance", CalAxis::X, 160.0f), 0);
     TEST_ASSERT_EQUAL(Response::Nack, r.kind);
 }
 
 void test_calibrate_z_axis_independently(void) {
     mm->traverseSteps = 6400;
-    sm->handleCommand(calCmd("calibrate_axis", 'Z'), 0);
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::Z), 0);
     sm->tick(0);
-    sm->handleCommand(calCmd("set_cal_distance", 'Z', 200.0f), 0);
+    sm->handleCommand(calCmd("set_cal_distance", CalAxis::Z, 200.0f), 0);
     // 6400 / 200 = 32.0 steps/mm
-    TEST_ASSERT_EQUAL_FLOAT(32.0f, sm->stepsPerMm('Z'));
+    TEST_ASSERT_EQUAL_FLOAT(32.0f, sm->stepsPerMm(CalAxis::Z));
     // X unchanged
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, sm->stepsPerMm('X'));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, sm->stepsPerMm(CalAxis::X));
 }
 
 void test_traverse_fault_enters_faulted_state(void) {
     // We can simulate a fault by injecting it directly — traverseToStop
     // returning Faulted is tested here by injecting a fault after tick.
     // Full HAL fault path is validated on the bench.
-    sm->handleCommand(calCmd("calibrate_axis", 'X'), 0);
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
     sm->injectFault("cal_traverse_failed");
     TEST_ASSERT_TRUE(State::Faulted == sm->state());
     TEST_ASSERT_EQUAL_STRING("cal_traverse_failed", sm->fault());
 }
+// ============================================================
+// calibrate_sensors and get_param
+// ============================================================
+
+static Command getParam(const char* key, int32_t id = 1) {
+    Command c; c.name = "get_param"; c.id = id; c.paramKey = key; return c;
+}
+
+void test_calibrate_sensors_stores_readings_to_config(void) {
+    mm->tofReadings[0] = 45.0f; mm->tofReadings[1] = 47.0f;
+    mm->tofReadings[2] = 46.0f; mm->tofReadings[3] = 48.0f;
+    Response r = sm->handleCommand(cmd("calibrate_sensors"), 0);
+    TEST_ASSERT_EQUAL(Response::Ack, r.kind);
+    TEST_ASSERT_TRUE(r.hasTofOffsets);
+    TEST_ASSERT_EQUAL_FLOAT(45.0f, r.tofOffsets[0]);
+    TEST_ASSERT_EQUAL_FLOAT(47.0f, r.tofOffsets[1]);
+    TEST_ASSERT_EQUAL_FLOAT(46.0f, r.tofOffsets[2]);
+    TEST_ASSERT_EQUAL_FLOAT(48.0f, r.tofOffsets[3]);
+    // Config should be updated
+    TEST_ASSERT_EQUAL_FLOAT(45.0f, cfg->tofOffsetMm[0]);
+    TEST_ASSERT_EQUAL_FLOAT(48.0f, cfg->tofOffsetMm[3]);
+}
+
+void test_calibrate_sensors_reads_all_four_channels(void) {
+    sm->handleCommand(cmd("calibrate_sensors"), 0);
+    TEST_ASSERT_EQUAL(4u, mm->distReads.size());
+    // Channels 0-3 in order
+    for (int i = 0; i < 4; i++)
+        TEST_ASSERT_EQUAL(i, mm->distReads[i].channel);
+}
+
+void test_calibrate_sensors_saves_to_eeprom(void) {
+    mm->tofReadings[0] = 50.0f;
+    sm->handleCommand(cmd("calibrate_sensors"), 0);
+    // Verify by loading a fresh Config from the fake EEPROM
+    pnp::Config loaded;
+    TEST_ASSERT_TRUE(loaded.load());
+    TEST_ASSERT_EQUAL_FLOAT(50.0f, loaded.tofOffsetMm[0]);
+}
+
+void test_calibrate_sensors_rejected_in_running(void) {
+    sm->handleCommand(cmd("home"), 0);
+    sm->tick(StateMachine::kHomingMs);  // -> READY
+    doTransfer();
+    sm->handleCommand(cmd("run_program"), 0);  // -> RUNNING
+    Response r = sm->handleCommand(cmd("calibrate_sensors"), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+}
+
+void test_get_param_steps_per_mm_x(void) {
+    cfg->stepsPerMmX = 80.0f;
+    Response r = sm->handleCommand(getParam("steps_per_mm_x"), 0);
+    TEST_ASSERT_EQUAL(Response::Ack, r.kind);
+    TEST_ASSERT_TRUE(r.hasParamValue);
+    TEST_ASSERT_EQUAL_FLOAT(80.0f, r.paramValue);
+}
+
+void test_get_param_steps_per_mm_y1(void) {
+    cfg->stepsPerMmY1 = 32.0f;
+    Response r = sm->handleCommand(getParam("steps_per_mm_y1"), 0);
+    TEST_ASSERT_TRUE(r.hasParamValue);
+    TEST_ASSERT_EQUAL_FLOAT(32.0f, r.paramValue);
+}
+
+void test_get_param_steps_per_mm_y2(void) {
+    cfg->stepsPerMmY2 = 32.5f;
+    Response r = sm->handleCommand(getParam("steps_per_mm_y2"), 0);
+    TEST_ASSERT_TRUE(r.hasParamValue);
+    TEST_ASSERT_EQUAL_FLOAT(32.5f, r.paramValue);
+}
+
+void test_get_param_tof_offset_0(void) {
+    cfg->tofOffsetMm[0] = 45.5f;
+    Response r = sm->handleCommand(getParam("tof_offset_0"), 0);
+    TEST_ASSERT_TRUE(r.hasParamValue);
+    TEST_ASSERT_EQUAL_FLOAT(45.5f, r.paramValue);
+}
+
+void test_get_param_tof_offset_3(void) {
+    cfg->tofOffsetMm[3] = 48.0f;
+    Response r = sm->handleCommand(getParam("tof_offset_3"), 0);
+    TEST_ASSERT_TRUE(r.hasParamValue);
+    TEST_ASSERT_EQUAL_FLOAT(48.0f, r.paramValue);
+}
+
+void test_get_param_uncalibrated_returns_negative(void) {
+    // Default tofOffsetMm is -1.0f (uncalibrated sentinel)
+    Response r = sm->handleCommand(getParam("tof_offset_2"), 0);
+    TEST_ASSERT_TRUE(r.hasParamValue);
+    TEST_ASSERT_EQUAL_FLOAT(-1.0f, r.paramValue);
+}
+
+void test_get_param_unknown_key_has_no_value(void) {
+    Response r = sm->handleCommand(getParam("nonsense_key"), 0);
+    TEST_ASSERT_EQUAL(Response::Ack, r.kind);
+    TEST_ASSERT_FALSE(r.hasParamValue);
+}
+
+
+void test_calibrate_y2_independently(void) {
+    mm->traverseSteps = 12750;
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::Y2), 0);
+    sm->tick(0);
+    sm->handleCommand(calCmd("set_cal_distance", CalAxis::Y2, 420.0f), 0);
+    // 12750 / 420 ≈ 30.357
+    float expected = 12750.0f / 420.0f;
+    TEST_ASSERT_EQUAL_FLOAT(expected, sm->stepsPerMm(CalAxis::Y2));
+    // Y1 unchanged
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, sm->stepsPerMm(CalAxis::Y1));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_run_program_in_idle_is_rejected_not_ready);
@@ -418,6 +530,20 @@ int main(void) {
     RUN_TEST(test_set_cal_distance_rejected_before_traverse);
     RUN_TEST(test_set_cal_distance_rejected_outside_calibrating);
     RUN_TEST(test_calibrate_z_axis_independently);
+    RUN_TEST(test_calibrate_y2_independently);
     RUN_TEST(test_traverse_fault_enters_faulted_state);
+
+    // calibrate_sensors + get_param
+    RUN_TEST(test_calibrate_sensors_stores_readings_to_config);
+    RUN_TEST(test_calibrate_sensors_reads_all_four_channels);
+    RUN_TEST(test_calibrate_sensors_saves_to_eeprom);
+    RUN_TEST(test_calibrate_sensors_rejected_in_running);
+    RUN_TEST(test_get_param_steps_per_mm_x);
+    RUN_TEST(test_get_param_steps_per_mm_y1);
+    RUN_TEST(test_get_param_steps_per_mm_y2);
+    RUN_TEST(test_get_param_tof_offset_0);
+    RUN_TEST(test_get_param_tof_offset_3);
+    RUN_TEST(test_get_param_uncalibrated_returns_negative);
+    RUN_TEST(test_get_param_unknown_key_has_no_value);
     return UNITY_END();
 }

@@ -72,6 +72,7 @@ COMMAND_STATES: Dict[str, set] = {
     "set_servo":      {State.IDLE, State.READY},
     "calibrate_axis":     {State.IDLE, State.READY},
     "set_cal_distance":   {State.CALIBRATING},
+    "calibrate_sensors":  {State.IDLE, State.READY},
 }
 
 ALWAYS_ACCEPT = {
@@ -135,6 +136,7 @@ class MachineState:
     cal_axis:      str   = ""
     cal_raw_steps: int   = 0
     steps_per_mm:  dict  = field(default_factory=lambda: {"X":0.0,"Y":0.0,"Z":0.0})
+    tof_offsets:   list  = field(default_factory=lambda: [None, None, None, None])
     params: Dict[str, Any] = field(default_factory=lambda: {
         "laser_interlock_mode":        0,
         "status_rate_hz":              5,
@@ -589,6 +591,14 @@ class StateMachine:
             axis = cal_map[k]
             val  = self.ms.steps_per_mm.get(axis, 0.0)
             self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":val}); return
+        # ToF offset params
+        if k and k.startswith("tof_offset_"):
+            try:
+                ch  = int(k.split("_")[-1])
+                val = self.ms.tof_offsets[ch]
+                self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":val}); return
+            except (IndexError, ValueError):
+                pass
         if k not in self.ms.params:
             self.send({"type":"nack","id":i,"cmd":"get_param","reason":"invalid_param"}); return
         self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":self.ms.params[k]})
@@ -656,6 +666,13 @@ class StateMachine:
                    "outputs":{"pump":ms.pump,"valve":ms.valve,
                                "servo_door":ms.servo_door,"servo_laser_btn":ms.servo_laser_btn},
                    "inputs":{"estop_hw":ms.estop_hw,"start_btn":ms.start_btn,"pause_btn":ms.pause_btn}})
+
+    def _cmd_calibrate_sensors(self, i, m):
+        """Read ch0-ch3 and store as the blocked/touching baseline offsets."""
+        offsets = [self.ms.tof_dist_mm[ch] for ch in range(4)]
+        self.ms.tof_offsets = list(offsets)
+        self.send({"type":"ack","id":i,"cmd":"calibrate_sensors",
+                   "offsets":offsets})
 
     def _cmd_calibrate_axis(self, i, m):
         axis = str(m.get("axis", "X")).upper()
