@@ -1,8 +1,9 @@
 # Pick-and-Place Paper Loader — Project Documentation
 
-Version v0.9. The system loads uncut material into laser positions, verifies
-pickup, waits for laser-safe conditions, and deposits finished parts. The laser
-cutter is treated as an external system.
+Version v1.0-dev (post-pivot: limit-switch homing, VL53L4CD ToF, jog-and-measure
+calibration, Config v4 soft limits). The system loads uncut material into laser
+positions, verifies pickup, waits for laser-safe conditions, and deposits finished
+parts. The laser cutter is treated as an external system.
 
 ---
 
@@ -12,7 +13,7 @@ cutter is treated as an external system.
 |---|---|
 | `architecture.md` | Hardware overview, motion, power, sensors, states, safety. |
 | `pin-mapping.md` | RAMPS 1.4 + Arduino Mega pin reference. |
-| `communication-protocol.md` | JSON-over-USB command/status contract between GUI and firmware (v0.9). |
+| `communication-protocol.md` | JSON-over-USB command/status contract between GUI and firmware (v1.0). |
 | `job-program.md` | Job program instruction set — the language the machine executes. |
 | `components-and-references.md` | Module inventory with datasheet-verified specs and reference-doc index. |
 | `open-decisions.md` | Live decision log — questions not yet settled. |
@@ -109,14 +110,23 @@ and the serial-worker framing.
 - Unit test suite (`Software/tests/`, pytest) covering the interpreter, simulator state machine / protocol / chunked transfer, and serial-worker framing.
 
 **Not yet implemented in simulator:**
-- Continuous safety monitors — laser-park interlock (`laser_not_parked`), pickup-loss detection (`pickup_lost`), and StallGuard stall/jam detection (`motion_fault`), documented in `architecture.md` §11. Required in firmware before hardware bring-up.
-- Headless control model (Start/Pause buttons, status LEDs, beeper) and the `program_loaded` flag — designed (`architecture.md` §9, `communication-protocol.md` §7.1), not yet modelled.
+- Continuous safety monitors — laser-park interlock (`laser_not_parked`) and
+  pickup-loss detection (`pickup_lost`), documented in `architecture.md` §11.
+  Required in firmware before hardware bring-up. (In-motion stall/jam detection is
+  no longer planned for v1.0 — StallGuard was retired with the move to limit-switch
+  homing.)
+- Headless control model (Start/Pause buttons, heartbeat LED, beeper) and the
+  `program_loaded` flag — designed (`architecture.md` §9), not yet modelled.
+- **Jog-and-measure calibration.** The firmware now uses `cal_jog` + `set_cal_distance`
+  (and `set_max_travel` for soft limits); the simulator and GUI calibration tab still
+  model the old auto-traverse and must be brought into line (next task).
 
 **Not yet validated on hardware:**
 - Stepper motion through RAMPS + TMC2209 in UART mode.
-- StallGuard sensorless homing and per-side dual-Y squaring (threshold tuning).
-- VL53L0X wiring through TCA9548A.
-- Vacuum pump/valve driver.
+- Limit-switch homing and per-side dual-Y squaring.
+- VL53L4CD wiring through the TCA9548A mux (1 of 6 sensors wired so far).
+- Vacuum pump (L298N H-bridge) and solenoid (AOD4184 MOSFET) drivers.
 - Hardware-enforced E-stop power removal.
-- EEPROM config and program storage.
-- Headless operation: buttons, status LEDs, beeper.
+- Headless operation: buttons, heartbeat LED, beeper.
+- The real `Machine` HAL — `jogAxisSteps`, limit-switch homing, ToF-through-mux,
+  servos. (Config v4, soft limits, and jog-and-measure logic are host-tested.)

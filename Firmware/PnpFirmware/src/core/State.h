@@ -11,7 +11,7 @@ enum class State : uint8_t {
   Paused,
   Faulted,
   Estopped,
-  Calibrating,   // traversing to far stop, then awaiting set_cal_distance
+  Calibrating,   // operator jogging a known step count, then awaiting set_cal_distance
   Count
 };
 

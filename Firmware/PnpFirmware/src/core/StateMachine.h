@@ -46,9 +46,10 @@ struct Command {
   // get_param
   const char* paramKey = "";
 
-  // calibrate_axis / set_cal_distance
+  // calibrate_axis / set_cal_distance / set_max_travel / cal_jog
   CalAxis     calAxis    = CalAxis::X;
-  float       calDistMm  = 0.0f;
+  float       mm         = 0.0f;   // magnitude arg (cal distance or travel limit)
+  int32_t     steps      = 0;      // cal_jog raw step count (signed = direction)
 };
 
 struct Response {
@@ -63,6 +64,7 @@ struct Response {
   // get_param response payload
   bool        hasParamValue = false;
   float       paramValue    = 0.0f;
+  const char* paramKey      = "";   // echoed back as "key" (the actual param, not the cmd)
   // calibrate_sensors response payload
   bool        hasTofOffsets = false;
   float       tofOffsets[4] = {0,0,0,0};
@@ -82,7 +84,7 @@ struct StatusSnapshot {
   bool        estopHw;
   // Calibration fields
   const char* calAxis;         // axis name being calibrated (nullptr = none)
-  uint32_t    calSteps;        // raw steps from traverse (0 = traverse not done)
+  uint32_t    calSteps;        // net steps jogged so far (0 = none yet)
 };
 
 class StateMachine {
@@ -103,8 +105,8 @@ class StateMachine {
 
   // Calibration accessors (for tests and future Config wiring).
   float    stepsPerMm(CalAxis axis) const;
-  uint32_t calSteps()            const { return calRawSteps_; }
-  bool     calTraverseDone()     const { return calTraverseDone_; }
+  // Net steps jogged so far this calibration (magnitude). 0 = nothing jogged.
+  uint32_t calSteps() const { return (uint32_t)(calJogSteps_ < 0 ? -calJogSteps_ : calJogSteps_); }
 
   void setProgramLoaded(bool v);
 
@@ -127,10 +129,9 @@ class StateMachine {
   bool        estopHw_        = false;
   uint32_t    homingDeadline_ = 0;
 
-  // Calibration state
-  CalAxis  calAxis_         = CalAxis::Invalid;
-  uint32_t calRawSteps_     = 0;
-  bool     calTraverseDone_ = false;
+  // Calibration state (jog-and-measure)
+  CalAxis  calAxis_      = CalAxis::Invalid;
+  int32_t  calJogSteps_  = 0;     // net steps jogged this session (signed)
   char     xferErr_[80] = {};
 };
 

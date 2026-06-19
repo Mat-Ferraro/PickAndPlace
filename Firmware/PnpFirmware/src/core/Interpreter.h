@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include "../hal/IMachine.h"
 #include "../platform/Platform.h"
+#include "../config/TravelLimits.h"
 
 // C++ port of Software/interpreter.py — executes a validated job program
 // against IMachine. Faithful to the Python: same ops, same rules, same fault
@@ -51,6 +52,12 @@ class Interpreter {
     // must ensure it outlives the Interpreter.
     void load(JsonObjectConst program);
 
+    // Push the active soft travel envelope before run(). The StateMachine calls
+    // this from run_program with the current Config limits, so a MOVE outside
+    // [0, maxTravelMm] faults. Independent of load() — the envelope is machine
+    // configuration, not part of the program. Defaults to disabled (unbounded).
+    void setTravelLimits(const TravelLimits& limits) { limits_ = limits; }
+
     // Run to completion (blocking). Returns:
     //   Ok      — normal completion or HALT
     //   Aborted — E-stop fired (stop flag set)
@@ -69,9 +76,13 @@ class Interpreter {
     OpResult execBody(JsonArrayConst instrs);
     OpResult execOne(JsonObjectConst instr);
 
+    // Single chokepoint for all programmatic motion: enforces the soft travel
+    // envelope (limits_) then delegates to machine_.moveTo. Both the MOVE
+    // waypoints and the final target route through here.
+    OpResult guardedMove(float x, float y, float z, uint8_t speed);
+
     OpResult execMove(JsonObjectConst i);
-    OpResult execProbeZ(JsonObjectConst i);
-    OpResult execHome(JsonObjectConst i);
+    OpResult execProbeZ(JsonObjectConst i);    OpResult execHome(JsonObjectConst i);
     OpResult execOutput(JsonObjectConst i);
     OpResult execReadSensor(JsonObjectConst i);
     OpResult execWait(JsonObjectConst i);
@@ -106,6 +117,7 @@ class Interpreter {
     // ---- state ----
     IMachine&      machine_;
     AbortFlags&    flags_;
+    TravelLimits   limits_;     // soft work envelope; disabled => unbounded
     JsonObjectConst prog_;      // root program object (loaded)
     float           cfgProbeStep_     = 0.5f;
     float           cfgProbeMaxDepth_ = 200.0f;

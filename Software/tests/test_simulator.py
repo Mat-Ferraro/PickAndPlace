@@ -13,6 +13,7 @@ Run from the Software/ directory:  pytest -q
 
 import base64
 import json
+import queue
 import threading
 
 import pytest
@@ -769,12 +770,9 @@ class TestSimulatedMachine:
 # Stepper calibration
 # ===========================================================================
 
-def _complete_traverse(sm):
-    """Force the calibration traverse to complete (bypasses the real-time timer).
-    Mirrors the fake_steps dict in _tick_calibrating so tests see consistent values."""
-    fake_steps = {"X": 12800, "Y": 12800, "Z": 6400}
-    sm.ms.cal_raw_steps = fake_steps.get(sm.ms.cal_axis, 3200)
-    sm._cal_done_at = None
+def _jog(sm, steps):
+    """Jog-and-measure: send a cal_jog command to accumulate raw steps."""
+    return step(sm, {"id": 99, "cmd": "cal_jog", "steps": steps})
 
 
 class TestStepperCalibration:
@@ -827,25 +825,30 @@ class TestStepperCalibration:
         step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "Z"})
         assert sm.ms.cal_axis == "Z"
 
-    def test_traverse_completes_after_timer(self, sm, monkeypatch):
-        import time
-        t = [1000.0]
-        monkeypatch.setattr(time, "monotonic", lambda: t[0])
+    def test_cal_jog_accumulates_steps(self, sm):
         step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
-        assert sm.ms.cal_raw_steps == 0   # traverse not done yet
-        t[0] = 1003.0
-        sm.tick()
-        assert sm.ms.cal_raw_steps > 0    # traverse complete
-        assert sm.ms.state == State.CALIBRATING  # still waiting for distance
+        assert sm.ms.cal_jog_steps == 0
+        _jog(sm, 8000)
+        _jog(sm, 4800)
+        assert sm.ms.cal_jog_steps == 12800
+        assert sm.ms.state == State.CALIBRATING   # still waiting for distance
 
-    def test_traverse_stores_axis_specific_steps(self, sm):
+    def test_cal_jog_accumulates_signed_net(self, sm):
         step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "Z"})
-        _complete_traverse(sm)
-        assert sm.ms.cal_raw_steps == 6400   # Z gets a different fake count
+        _jog(sm, 6400)
+        _jog(sm, -2000)
+        assert sm.ms.cal_jog_steps == 4400   # net of out-and-back
+
+    def test_cal_jog_rejected_outside_calibrating(self, sm):
+        sm.ms.set_state(State.READY)
+        msgs = step(sm, {"id": 1, "cmd": "cal_jog", "steps": 1000})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "not_ready"
 
     def test_set_cal_distance_computes_steps_per_mm(self, sm):
         step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
-        _complete_traverse(sm)   # cal_raw_steps = 12800
+        _jog(sm, 12800)
         msgs = step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "X", "mm": 160.0})
         r = only(msgs)
         assert r["type"] == "ack"
@@ -854,21 +857,21 @@ class TestStepperCalibration:
 
     def test_set_cal_distance_returns_to_idle(self, sm):
         step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "Y"})
-        _complete_traverse(sm)
+        _jog(sm, 9000)
         step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "Y", "mm": 300.0})
         assert sm.ms.state == State.IDLE
 
-    def test_set_cal_distance_rejects_before_traverse(self, sm):
+    def test_set_cal_distance_rejects_before_jog(self, sm):
         step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
-        # _cal_done_at is in the future; traverse not done yet
+        # No cal_jog yet — nothing to divide.
         msgs = step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "X", "mm": 100.0})
         r = only(msgs)
         assert r["type"] == "nack"
-        assert r["reason"] == "traverse_not_done"
+        assert r["reason"] == "no_jog_steps"
 
     def test_set_cal_distance_rejects_zero_distance(self, sm):
         step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
-        _complete_traverse(sm)
+        _jog(sm, 12800)
         msgs = step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "X", "mm": 0.0})
         r = only(msgs)
         assert r["type"] == "nack"
@@ -878,10 +881,9 @@ class TestStepperCalibration:
         for axis in ("X", "Y", "Z"):
             sm.ms.set_state(State.IDLE)
             sm.ms.cal_axis = ""
-            sm.ms.cal_raw_steps = 0
-            sm._cal_done_at = None
+            sm.ms.cal_jog_steps = 0
             step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": axis})
-            _complete_traverse(sm)
+            _jog(sm, 10000)
             step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": axis, "mm": 100.0})
         for axis in ("X", "Y", "Z"):
             assert sm.ms.steps_per_mm[axis] > 0
@@ -893,9 +895,9 @@ class TestStepperCalibration:
         assert status.get("cal_axis") is None
         assert status.get("cal_steps") is None
 
-    def test_cal_fields_present_after_traverse(self, sm):
+    def test_cal_fields_present_during_jog(self, sm):
         step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
-        _complete_traverse(sm)
+        _jog(sm, 12800)
         status = sm._build_status()
         assert status["cal_axis"] == "X"
         assert status["cal_steps"] == 12800
@@ -909,7 +911,7 @@ class TestStepperCalibration:
 
     def test_get_param_steps_per_mm_x_returns_value(self, sm):
         step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
-        _complete_traverse(sm)
+        _jog(sm, 12800)
         step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": "X", "mm": 200.0})
         msgs = step(sm, {"id": 3, "cmd": "get_param", "key": "steps_per_mm_x"})
         r = only(msgs, "get_param")
@@ -921,6 +923,112 @@ class TestStepperCalibration:
         r = only(msgs, "get_param")
         assert r["type"] == "ack"
         assert r["value"] == pytest.approx(0.0)
+
+
+# ===========================================================================
+# Soft travel limits  (set_max_travel + enforcement)
+# ===========================================================================
+
+class TestSoftTravelLimits:
+    """Tests for set_max_travel and the soft-limit enforcement on motion."""
+
+    # ---- set_max_travel command ----
+
+    def test_set_max_travel_writes_limit(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "set_max_travel", "axis": "X", "mm": 250.0})
+        assert only(msgs)["type"] == "ack"
+        assert sm.ms.max_travel_mm["X"] == pytest.approx(250.0)
+
+    def test_set_max_travel_accepted_in_ready(self, sm):
+        sm.ms.set_state(State.READY)
+        msgs = step(sm, {"id": 1, "cmd": "set_max_travel", "axis": "Z", "mm": 80.0})
+        assert only(msgs)["type"] == "ack"
+
+    def test_set_max_travel_rejected_in_running(self, sm):
+        sm.ms.set_state(State.RUNNING)
+        msgs = step(sm, {"id": 1, "cmd": "set_max_travel", "axis": "X", "mm": 250.0})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "not_ready"
+
+    def test_set_max_travel_rejects_bad_axis(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "set_max_travel", "axis": "Q", "mm": 250.0})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "invalid_axis"
+
+    def test_set_max_travel_rejects_nonpositive(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "set_max_travel", "axis": "X", "mm": 0.0})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "invalid_travel"
+
+    def test_set_max_travel_y1_y2_map_to_y(self, sm):
+        step(sm, {"id": 1, "cmd": "set_max_travel", "axis": "Y1", "mm": 400.0})
+        assert sm.ms.max_travel_mm["Y"] == pytest.approx(400.0)
+
+    def test_get_param_reads_max_travel(self, sm):
+        step(sm, {"id": 1, "cmd": "set_max_travel", "axis": "X", "mm": 250.0})
+        msgs = step(sm, {"id": 2, "cmd": "get_param", "key": "max_travel_mm_x"})
+        r = only(msgs, "get_param")
+        assert r["type"] == "ack"
+        assert r["value"] == pytest.approx(250.0)
+
+    # ---- enforcement on the manual move_to command ----
+
+    def _configure_envelope(self, sm, x=200.0, y=200.0, z=100.0):
+        sm.ms.max_travel_mm = {"X": x, "Y": y, "Z": z}
+        sm.ms.set_state(State.READY)
+
+    def test_move_to_within_envelope_acked(self, sm):
+        self._configure_envelope(sm)
+        msgs = step(sm, {"id": 1, "cmd": "move_to", "x_mm": 150.0, "y_mm": 50.0, "z_mm": 10.0})
+        assert only(msgs)["type"] == "ack"
+
+    def test_move_to_outside_envelope_nacked(self, sm):
+        self._configure_envelope(sm)
+        msgs = step(sm, {"id": 1, "cmd": "move_to", "x_mm": 250.0, "y_mm": 50.0, "z_mm": 10.0})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "soft_limit_x"
+
+    def test_move_to_negative_nacked(self, sm):
+        self._configure_envelope(sm)
+        msgs = step(sm, {"id": 1, "cmd": "move_to", "x_mm": 10.0, "y_mm": -5.0, "z_mm": 10.0})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "soft_limit_y"
+
+    def test_move_to_unbounded_when_unconfigured(self, sm):
+        # No limits set (all zero) → motion is unbounded.
+        sm.ms.set_state(State.READY)
+        msgs = step(sm, {"id": 1, "cmd": "move_to", "x_mm": 9999.0, "y_mm": 0.0, "z_mm": 0.0})
+        assert only(msgs)["type"] == "ack"
+
+    # ---- enforcement at the SimulatedMachine chokepoint (program MOVE path) ----
+
+    def test_simulated_machine_move_to_faults_outside_envelope(self):
+        ms = MachineState()
+        ms.max_travel_mm = {"X": 200.0, "Y": 200.0, "Z": 100.0}
+        machine = SimulatedMachine(ms, queue.Queue())
+        with pytest.raises(ProgramFault) as exc:
+            machine.move_to(250.0, 10.0, 10.0, threading.Event())
+        assert exc.value.reason == "soft_limit_x"
+
+    def test_simulated_machine_move_to_ok_inside_envelope(self):
+        ms = MachineState()
+        ms.max_travel_mm = {"X": 200.0, "Y": 200.0, "Z": 100.0}
+        machine = SimulatedMachine(ms, queue.Queue())
+        machine.move_to(150.0, 150.0, 50.0, threading.Event())   # must not raise
+        assert ms.x_mm == pytest.approx(150.0)
+
+    def test_travel_violation_helper(self):
+        limits = {"X": 200.0, "Y": 200.0, "Z": 100.0}
+        assert simulator.travel_violation(limits, 150, 150, 50) is None
+        assert simulator.travel_violation(limits, 201, 0, 0) == "x"
+        assert simulator.travel_violation(limits, 0, 0, 120) == "z"
+        # Unconfigured (any axis zero) → unbounded.
+        assert simulator.travel_violation({"X": 0, "Y": 0, "Z": 0}, 9999, 9999, 9999) is None
 
 
 # ===========================================================================

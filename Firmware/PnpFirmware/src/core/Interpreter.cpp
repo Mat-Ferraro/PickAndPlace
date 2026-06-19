@@ -122,7 +122,7 @@ OpResult Interpreter::execMove(JsonObjectConst i) {
                 !resolveFloat(wp["y"], wy) ||
                 !resolveFloat(wp["z"], wz))
                 return OpResult::Faulted;
-            OpResult r = machine_.moveTo(wx, wy, wz, speed);
+            OpResult r = guardedMove(wx, wy, wz, speed);
             if (r != OpResult::Ok) return r;
             r = check();
             if (r != OpResult::Ok) return r;
@@ -134,6 +134,21 @@ OpResult Interpreter::execMove(JsonObjectConst i) {
         !resolveFloat(i["y"], y) ||
         !resolveFloat(i["z"], z))
         return OpResult::Faulted;
+    return guardedMove(x, y, z, speed);
+}
+
+// All programmatic motion funnels through here so the soft travel envelope is
+// enforced in exactly one place, above the HAL and host-testable. A target
+// outside [0, maxTravelMm] on any axis faults with reason "soft_limit_<axis>"
+// (lowercase) and never reaches the machine.
+OpResult Interpreter::guardedMove(float x, float y, float z, uint8_t speed) {
+    const char* axis = limits_.offendingAxis(x, y, z);
+    if (axis) {
+        char msg[24];
+        PNP_SNPRINTF(msg, sizeof(msg), "soft_limit_%c",
+                     (char)(axis[0] + 32));   // 'X'->'x', 'Y'->'y', 'Z'->'z'
+        return fault(msg);
+    }
     return machine_.moveTo(x, y, z, speed);
 }
 

@@ -113,6 +113,8 @@ class MainWindow(QMainWindow):
             # Fetch persisted calibration values
             for axis_key in ("steps_per_mm_x", "steps_per_mm_y", "steps_per_mm_z"):
                 self._send({"cmd": "get_param", "key": axis_key})
+            for axis_key in ("max_travel_mm_x", "max_travel_mm_y", "max_travel_mm_z"):
+                self._send({"cmd": "get_param", "key": axis_key})
             for ch in range(4):
                 self._send({"cmd": "get_param", "key": f"tof_offset_{ch}"})
             self._sensor_timer.start(2000)   # poll sensors every 2 s
@@ -159,7 +161,9 @@ class MainWindow(QMainWindow):
         "reset_estop":  "User: E-Stop reset",
         "calibrate_sensors": "User: Sensor baseline read",
         "calibrate_axis":    None,   # built dynamically
+        "cal_jog":           None,   # built dynamically
         "set_cal_distance":  None,   # built dynamically
+        "set_max_travel":    None,   # built dynamically
         "teach_position": None,   # built dynamically below
         "save_position":  None,
     }
@@ -170,8 +174,14 @@ class MainWindow(QMainWindow):
             if verb in self._LOG_CMDS:
                 if verb == "calibrate_axis":
                     msg = f"User: Calibrate {cmd.get('axis','?')} axis started"
+                elif verb == "cal_jog":
+                    msg = (f"User: Jog {cmd.get('axis','?')} "
+                           f"{cmd.get('steps',0):+d} steps")
                 elif verb == "set_cal_distance":
                     msg = (f"User: Cal distance set — "
+                           f"{cmd.get('axis','?')} = {cmd.get('mm',0):.1f} mm")
+                elif verb == "set_max_travel":
+                    msg = (f"User: Max travel set — "
                            f"{cmd.get('axis','?')} = {cmd.get('mm',0):.1f} mm")
                 elif verb == "teach_position":
                     msg = f"User: Taught position '{cmd.get('name', '?')}'"
@@ -251,8 +261,15 @@ class MainWindow(QMainWindow):
                         "steps_per_mm_y": "Y",
                         "steps_per_mm_z": "Z",
                     }
+                    travel_map = {
+                        "max_travel_mm_x": "X",
+                        "max_travel_mm_y": "Y",
+                        "max_travel_mm_z": "Z",
+                    }
                     if key in axis_map:
                         self._cal_tab.set_steps_per_mm(axis_map[key], float(value))
+                    elif key in travel_map:
+                        self._cal_tab.set_max_travel_value(travel_map[key], float(value))
                     elif key.startswith("tof_offset_"):
                         ch = int(key.split("_")[-1])
                         self._cal_tab.set_baseline(ch, float(value))
@@ -266,6 +283,12 @@ class MainWindow(QMainWindow):
                 # Refresh calibration values after a successful set
                 for axis_key in ("steps_per_mm_x", "steps_per_mm_y", "steps_per_mm_z"):
                     self._send({"cmd": "get_param", "key": axis_key})
+            elif cmd == "set_max_travel":
+                # Refresh travel limits after a successful set
+                for axis_key in ("max_travel_mm_x", "max_travel_mm_y", "max_travel_mm_z"):
+                    self._send({"cmd": "get_param", "key": axis_key})
+            elif cmd == "cal_jog":
+                pass   # accumulator surfaced via status (cal_steps)
             elif cmd in ("reset_fault", "reset_estop"):
                 self._last_fault = None   # allow next fault to log fresh
             elif cmd == "run_program":
@@ -288,7 +311,7 @@ class MainWindow(QMainWindow):
                 self._prog_tab.on_upload_nack(detail)
                 QMessageBox.warning(self, "Program Error",
                     f"Could not load program:\n{detail}")
-            elif cmd in ("calibrate_axis", "set_cal_distance"):
+            elif cmd in ("calibrate_axis", "cal_jog", "set_cal_distance", "set_max_travel"):
                 QMessageBox.warning(self, "Calibration Error",
                     f"Calibration command failed:\n{reason}")
             self._status_bar.showMessage(

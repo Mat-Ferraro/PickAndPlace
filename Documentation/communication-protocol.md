@@ -46,7 +46,7 @@ via the `current_op` and `step_index` status fields.
 | `PAUSED` | Executor suspended at a safe point. Resumable. |
 | `FAULTED` | A fault has occurred. Operator intervention required. |
 | `ESTOPPED` | E-stop active. All motion stopped. |
-| `CALIBRATING` | Stepper calibration in progress. Two phases: (1) traverse to far hard stop, counting steps; (2) awaiting `set_cal_distance` from the GUI. |
+| `CALIBRATING` | Stepper calibration in progress (jog-and-measure): the operator jogs the axis a known number of steps via `cal_jog`, then supplies the measured distance via `set_cal_distance`. |
 
 **State transition notes:**
 
@@ -62,11 +62,10 @@ via the `current_op` and `step_index` status fields.
 - `ESTOPPED` is entered from any state when the hardware e-stop fires or a
   software `estop` command is received. `reset_estop` → `IDLE` (not `READY` —
   position trust is lost).
-- `calibrate_axis` → `CALIBRATING`. Firmware homes the axis, then drives it to
-  the far hard stop counting steps. Once the traverse completes, `cal_steps` in
-  the status broadcast becomes non-zero — the GUI should then prompt the operator
-  to enter the actual travel distance. `set_cal_distance` → `IDLE`. Position
-  trust is lost; re-home before running.
+- `calibrate_axis` → `CALIBRATING`. The firmware does not move on its own; the
+  operator jogs the axis a known number of steps with `cal_jog` (the running total
+  appears as `cal_steps` in status), then sends `set_cal_distance` with the measured
+  travel. `set_cal_distance` → `IDLE`. Position trust is lost; re-home before running.
 
 ---
 
@@ -143,29 +142,35 @@ message.
 | `query_positions` | — | Return all stored named positions with coordinates. ★ always valid. |
 | `move_to` | `x_mm`, `y_mm`, `z_mm` *(float)* | Move to absolute coordinates. `READY` only. |
 | `save_position` | `name` *(str)*, `x_mm`, `y_mm`, `z_mm` *(float)* | Store coordinates as a named position without moving. `IDLE` and `READY`. |
-| `calibrate_axis` | `axis` *(str: `"X"`, `"Y"`, or `"Z"`)* | Begin stepper calibration for one axis. Homes the axis, then drives to the far hard stop using StallGuard, counting steps. → `CALIBRATING`. `IDLE` and `READY` only. |
-| `set_cal_distance` | `axis` *(str)*, `mm` *(float)* | Supply the actual travel distance after a successful traverse. Firmware computes `steps_per_mm = raw_steps / mm`, saves to Config/EEPROM, and returns to `IDLE`. Only valid in `CALIBRATING` after traverse completes (`cal_steps > 0` in status). |
+| `calibrate_axis` | `axis` *(str: `"X"`, `"Y1"`, `"Y2"`, or `"Z"`; `"Y"`→Y1)* | Begin jog-and-measure calibration for one motor. Enters `CALIBRATING` and zeroes the jog accumulator. No motion occurs yet. `IDLE` and `READY` only. |
+| `cal_jog` | `axis` *(str)*, `steps` *(int, signed)* | Jog the axis under calibration by a raw (uncalibrated) step count; `+`/`-` selects direction. Accumulates net steps (reported as `cal_steps`). Repeatable. `CALIBRATING` only. |
+| `set_cal_distance` | `axis` *(str)*, `mm` *(float)* | Supply the measured travel for the jogged steps. Firmware computes `steps_per_mm = |net_steps| / mm`, saves to Config/EEPROM, and returns to `IDLE`. Only valid in `CALIBRATING` after at least one `cal_jog` (else `no_jog_steps`). |
+| `set_max_travel` | `axis` *(str: `"X"`, `"Y"`, or `"Z"`; `"Y1"`/`"Y2"`→Y)* | Set the per-axis soft travel limit in mm. Writes Config and saves to EEPROM. `IDLE` and `READY` only. Y is a single envelope for the dual-Y gantry. |
 
 **Named positions:** `home`, `laser_a`, `laser_b`, `deposit`.
 
-**Calibration workflow:**
+**Calibration workflow (jog-and-measure):**
 
 ```
 GUI sends:  {"cmd": "calibrate_axis", "axis": "X"}
-FW returns: {"type": "ack", "cmd": "calibrate_axis"}   ← traverse begins
-  ... status broadcasts show state=CALIBRATING, cal_steps=0 while traversing ...
-  ... traverse completes ...
-  ... status broadcasts show state=CALIBRATING, cal_axis="X", cal_steps=12800 ...
-GUI shows dialog: "Measured 12800 steps for X. Enter actual travel distance (mm):"
-Operator measures with calipers, types 420.
-GUI sends:  {"cmd": "set_cal_distance", "axis": "X", "mm": 420.0}
+FW returns: {"type": "ack", "cmd": "calibrate_axis"}   ← enters CALIBRATING, accumulator = 0
+  ... operator jogs the axis a known amount (one or more cal_jog commands) ...
+GUI sends:  {"cmd": "cal_jog", "axis": "X", "steps": 12800}
+FW returns: {"type": "ack", "cmd": "cal_jog"}          ← status shows cal_steps = 12800
+  ... operator measures the physical travel with calipers: 160 mm ...
+GUI sends:  {"cmd": "set_cal_distance", "axis": "X", "mm": 160.0}
 FW returns: {"type": "ack", "cmd": "set_cal_distance"}
-  ... steps_per_mm = 12800 / 420.0 = 30.48, saved to EEPROM, state → IDLE ...
+  ... steps_per_mm = 12800 / 160.0 = 80.0, saved to EEPROM, state → IDLE ...
 ```
 
-Calibration must be run once per axis on first install and after any mechanical
+Jogs accumulate as a signed net (jog out then back and the net is what counts).
+Calibration must be run once per motor on first install and after any mechanical
 change (belt replacement, pulley change). The computed `steps_per_mm` persists
 across power cycles in EEPROM.
+
+**Soft travel limits** are set separately with `set_max_travel` (per axis, in mm)
+and persist in the same Config. After homing to a limit switch (position 0), a
+`MOVE` outside `[0, maxTravelMm]` faults with `soft_limit_<axis>` (see §6.2).
 
 ### 4.3 Program loading (`load_program`)
 
@@ -224,13 +229,19 @@ and `json_error:<detail>`.
 | `laser_interlock_mode` | 0 | Interlock source selection (see §4.6). |
 | `status_rate_hz` | 5 | Periodic status rate (2–10 Hz). |
 
-**Calibration params** (read-only via `get_param`; written only by `set_cal_distance`):
+**Calibration params** (read via `get_param`; `steps_per_mm_*` written by
+`set_cal_distance`):
 
 | Key | Description |
 |---|---|
 | `steps_per_mm_x` | X-axis calibration (steps/mm). |
-| `steps_per_mm_y` | Y-axis calibration (steps/mm). |
+| `steps_per_mm_y1` | Y1 motor calibration (steps/mm). |
+| `steps_per_mm_y2` | Y2 motor calibration (steps/mm). |
 | `steps_per_mm_z` | Z-axis calibration (steps/mm). |
+| `tof_offset_0`..`tof_offset_3` | Per-channel ToF pickup offset (mm); −1 = uncalibrated. |
+
+**Soft travel limits** (per axis, in mm) are written by `set_max_travel` and
+persist in the same Config; `0` = not configured.
 
 ### 4.5 Service and diagnostics
 
@@ -303,7 +314,9 @@ FAULTED, `estop_active` in ESTOPPED, `calibrating` in CALIBRATING — see §6.1)
 | `set_servo` | ✓ | — | ✓ | — | — | — | — | — |
 | `laser_safe` | ★ | ★ | ★ | ★ | ★ | ★ | ★ | ★ |
 | `calibrate_axis` | ✓ | — | ✓ | — | — | — | — | — |
+| `cal_jog` | — | — | — | — | — | — | — | ✓ |
 | `set_cal_distance` | — | — | — | — | — | — | — | ✓ |
+| `set_max_travel` | ✓ | — | ✓ | — | — | — | — | — |
 
 ---
 
@@ -320,9 +333,11 @@ FAULTED, `estop_active` in ESTOPPED, `calibrating` in CALIBRATING — see §6.1)
 | `oversized` | Line exceeded the 256-byte limit. |
 | `missing_id` | No `id` field. NACK sent with `"id": null`. |
 | `invalid_param` | Key unknown, value out of range/wrong type, or program validation failure. |
-| `invalid_axis` | `calibrate_axis` received an axis other than `X`, `Y`, or `Z`. |
+| `invalid_axis` | `calibrate_axis` / `set_max_travel` received an unrecognized axis. |
 | `invalid_distance` | `set_cal_distance` received a distance ≤ 0. |
-| `traverse_not_done` | `set_cal_distance` received before the calibration traverse completed. |
+| `invalid_travel` | `set_max_travel` received a limit ≤ 0. |
+| `no_jog_steps` | `set_cal_distance` received before any `cal_jog` (nothing to divide). |
+| `cal_jog_failed` | The HAL jog operation faulted during `cal_jog`; machine enters `FAULTED`. |
 | `estop_active` | Command rejected because e-stop is active (`ESTOPPED`). |
 | `hw_fault` | Command rejected because the machine is `FAULTED`, or `reset_estop` issued while the hardware e-stop is still held. |
 | `no_program` | `run_program` issued but no valid program is stored. |
@@ -348,7 +363,8 @@ FAULTED, `estop_active` in ESTOPPED, `calibrating` in CALIBRATING — see §6.1)
 | `motion_fault` | Unexpected limit hit or stall during travel. |
 | `laser_interlock` | Machine attempted laser workspace entry but interlock not met. |
 | `laser_not_parked` | Arm move attempted while laser head is not in park position. |
-| `cal_traverse_failed` | StallGuard did not trigger during calibration traverse (motor stalled or driver fault). |
+| `cal_jog_failed` | The HAL jog operation faulted during `cal_jog` (driver fault or motion error). |
+| `soft_limit_x` / `soft_limit_y` / `soft_limit_z` | A `MOVE` target was outside `[0, maxTravelMm]` on that axis (soft travel limit). |
 | `config_invalid` | EEPROM config failed CRC or schema version mismatch at boot. |
 | `estop_triggered` | Hardware e-stop input fired. |
 
@@ -392,8 +408,8 @@ Emitted at 2–10 Hz (configurable). Carries aggregate state.
 | `step_index` | int or null | Flat instruction index. Non-null only during `RUNNING` / `PAUSED`. |
 | `loop_iter` | int or null | Current iteration of the innermost active loop. |
 | `variables` | object or null | Snapshot of all current program variables. |
-| `cal_axis` | str or null | Axis being calibrated (`"X"`, `"Y"`, `"Z"`), or null. Non-null only during `CALIBRATING` after traverse completes. |
-| `cal_steps` | int or null | Raw step count from the calibration traverse. Non-null and > 0 only after traverse completes. GUI should show the "enter distance" dialog when this is non-zero. |
+| `cal_axis` | str or null | Motor being calibrated (`"X"`, `"Y1"`, `"Y2"`, `"Z"`), or null. Non-null only during `CALIBRATING`. |
+| `cal_steps` | int or null | Net steps jogged so far this calibration (magnitude). 0 until the first `cal_jog`. |
 
 ### 7.2 `query_sensors` ACK
 
@@ -452,10 +468,12 @@ Emitted at 2–10 Hz (configurable). Carries aggregate state.
 
 Two independent items live in EEPROM:
 
-**Configuration** — machine calibration: `steps_per_mm` per axis, home offsets,
-named position coordinates, sensor thresholds, servo angles, motion parameters.
-Managed via `set_param` / `save_config` / `load_config` and written automatically
-after a successful `set_cal_distance`. Loaded at boot. Updated infrequently.
+**Configuration** — machine calibration: `steps_per_mm` per motor (X/Y1/Y2/Z),
+per-axis soft travel limits (`maxTravelMm`), ToF pickup offsets, named position
+coordinates, sensor thresholds, servo angles, motion parameters. Managed via
+`set_param` / `set_cal_distance` / `set_max_travel` / `save_config` / `load_config`
+and written automatically after a successful `set_cal_distance` or `set_max_travel`.
+Loaded at boot. Schema is **v4** (see `firmware-architecture.md`). Updated infrequently.
 
 **Job program** — the instruction sequence the executor runs. Uploaded via
 `load_program`, stored separately from config. Persists across power cycles so

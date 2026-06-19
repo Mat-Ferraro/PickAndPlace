@@ -12,18 +12,19 @@ datasheets currently held in the project; anything not yet confirmed is marked.
 |---|---|---|
 | Elegoo / Arduino Mega 2560 R3 | Controller | Bench-verified (upload, blink, serial, button, servo, solenoid) |
 | RAMPS 1.4 shield | Expansion (stepper sockets, MOSFET outputs, endstops, servo headers, I2C breakout) | Installed |
-| Teyleten Robot TMC2209 V2.0 StepStick | Stepper drivers (UART mode) | Installed, motion not yet tested; `PDN_UART` and `DIAG` pads confirmed exposed (enables UART + StallGuard sensorless homing) |
+| Teyleten Robot TMC2209 V2.0 StepStick | Stepper drivers (UART mode) | Installed; `PDN_UART` confirmed exposed (UART used for current/microstep config). StallGuard/`DIAG` no longer used — homing is by limit switches |
 | 42BYGHW811 NEMA 17 stepper | Candidate axis motor | Candidate; ~2.5 A/phase (datasheet still needed) |
 | MG90S-style micro servo | Door / laser-button actuators (×2) | Movement tested |
-| AEDIKO 12 V 1-ch relay module | Pump/solenoid ON/OFF candidate | Candidate (driver choice still open) |
-| L298N dual H-bridge | Bench DC-motor experiments only | Likely not in final design |
-| Hosyond 2.42" 128x64 SSD1309 OLED | Optional local status display | Optional |
-| 6× VL53L0X ToF sensor | Pickup verification + laser-home + material detection | Not yet wired |
-| TCA9548A | I2C mux for the six identical VL53L0X sensors | Not yet wired |
-| 3-wire mushroom E-stop button (latched) | Latched stop; release clears ESTOPPED → IDLE | Input tested |
-| RGB status LED + program-loaded LED | Headless state indication (onboard LED is under the shield) | To source; pins assigned (`pin-mapping.md` §4) |
-| Piezo beeper | Headless audible status (press confirm, fault alert, refused-action chirp) | To source |
-| 2× momentary pushbutton (Start, Pause) | Headless operator controls | To source |
+| L298N dual H-bridge | **Vacuum pump driver (committed)** — IN1 D23, IN2 D25, ENA D11/PWM | Bench-tested |
+| AOD4184 MOSFET module | **Solenoid valve driver (committed)** — low-side switch, PWM D6 | Bench-tested |
+| 4× mechanical limit switch | Homing (one per motor: X, Y1, Y2, Z); NC, polled | To wire (freed XSHUT block D27/29/31/33) |
+| Hosyond 2.42" 128x64 SSD1309 OLED | Optional local status display | Optional (deferred for v1.0) |
+| 6× VL53L4CD ToF sensor | Pickup verification + laser-home + material detection | New part (1 mm class); 1 of 6 wired |
+| TCA9548A | I2C mux for the six identical VL53L4CD sensors (addr 0x70) | Bought; not yet wired |
+| 3-wire mushroom E-stop button (latched) | Latched stop; release clears ESTOPPED → IDLE | Input tested (Z_MIN/D18) |
+| Green heartbeat LED (RAMPS, D8) | "Firmware alive" ~1 Hz blink (full RGB status LED deferred) | On-board RAMPS LED |
+| Piezo beeper | Headless audible status (press confirm, fault alert, refused-action chirp) | To source (D39) |
+| 2× momentary pushbutton (Start, Pause) | Headless operator controls (D3 / D14) | Input tested |
 
 ---
 
@@ -57,37 +58,33 @@ datasheets currently held in the project; anything not yet confirmed is marked.
   is preferred for six identical sensors. Powers up with **all channels deselected**.
 - **RESET:** active-low; connect to VCC through a pull-up if not driven by firmware.
 
-### 2.3 VL53L0X ToF sensor [ref: VL53L0X]
+### 2.3 VL53L4CD ToF sensor [ref: VL53L4CD]
 
-- **Supply (AVDD):** 2.6–3.5 V (typ 2.8 V). **Absolute max 3.6 V.** This is a
-  ~2.8 V part — **not** a 5 V part.
-- **I/O (IOVDD):** default API mode is **1.8 V logic** (1.6–1.9 V); a **2V8 mode**
-  is programmable (2.6–3.5 V). **SCL/SDA/XSHUT/GPIO1 absolute max is 3.6 V** — the
-  signal pins are **not** 5 V-tolerant. (This is the key fact resolving the old
-  "sensor voltage note.")
-- **I2C:** up to 400 kHz. The datasheet lists the default device address as
-  **0x52** in 8-bit address notation; Arduino `Wire` libraries usually use the
-  corresponding 7-bit address **0x29**. All six sensors share this same default,
-  which is why the mux is required. Reference registers for a quick bring-up
-  sanity check: 0xC0→0xEE, 0xC1→0xAA, 0xC2→0x10.
-- **XSHUT:** active-low; must always be driven (pull-up if the host does not control
-  it). Recommended XSHUT/GPIO1 pull-ups 10 kΩ; I2C pull-ups ~1.5–2 kΩ at 2.8 V/400 kHz.
-- **GPIO1:** open-drain interrupt output (new-measurement-ready); leave unconnected
-  if unused.
-- **Timing/behavior:** tBOOT ≤ 1.2 ms; FoV 25°; range up to 2 m (default profile
-  ~1.2 m). Ranging modes: single, continuous, timed.
-- **Current:** HW standby 3–7 µA, SW standby 4–9 µA, active ranging ~19 mA avg
-  (peak up to 40 mA). Operating temp −20 to 70 °C.
-- **Calibration (host-stored, once at manufacturing):** reference-SPAD, temperature
-  (repeat if temp changes >8 °C), offset (at 10 cm), and crosstalk (only if a cover
-  glass is used). Per the API user manual UM2039.
+- **Default I2C address 0x29** (7-bit). All six share it, which is why the
+  TCA9548A mux is required.
+- **Range:** up to ~1.3 m, **1 mm resolution / 1 mm-class minimum** — so no sensor
+  recess is needed (unlike the old VL53L0X plan). *Validate close-range on the
+  bench:* some setups read a ~70 mm floor until `SetRangeTiming` is configured.
+- **Register map is 16-bit** — **not** compatible with VL53L0X/VL53L1X libraries.
+  Use a dedicated VL53L4CD library: **Pololu `vl53l4cd-arduino`** (lean) or
+  **STM32duino `VL53L4CD`** (ST ULD wrapper). Both expose `setAddress()` for
+  multi-sensor setups, though here the mux handles selection.
+- **Mux as level translator:** the TCA9548A (5 V-tolerant inputs) bridges the 5 V
+  Mega bus to the sensor side, so it doubles as the translator regardless of whether
+  the ZORZA breakouts are bare or regulated.
+- **Calibration:** per-channel pickup offset stored in Config (`tofOffsetMm[4]`,
+  ch0–3). No cover-glass crosstalk routine needed for bare sensors.
+
+> The previous VL53L0X (DS11555) specs are superseded by this section. The old
+> 2.8 V / 3.6 V-signal voltage concern is retired — the mux handles translation.
 
 ### 2.4 TMC2209 stepper driver [ref: TMC2209 datasheet]
 
-- **Use mode:** **UART mode (committed)** — required for StallGuard4 sensorless
-  homing and jam detection. STEP/DIR carries motion; the shared single-wire UART bus
-  (MS1/MS2 addressing) configures current/microstepping and reads load. `PDN_UART`
-  and `DIAG` are confirmed exposed on the modules in hand. Library: `TMCStepper`.
+- **Use mode:** **UART mode (committed)** — used to set current/microstepping in
+  software and read status. STEP/DIR carries motion; a shared single-wire UART bus
+  (MS1/MS2 addressing) configures the drivers. `PDN_UART` confirmed exposed.
+  **Homing is by limit switches, so StallGuard4 / `DIAG` are not used.** Library:
+  `TMCStepper`.
 - **Current capability:** the TMC2209 chip is suitable for quiet two-phase stepper
   control, but the practical current limit depends heavily on the exact StepStick
   module, sense resistors, PCB copper, heatsink, airflow, and enclosure temperature.
@@ -117,25 +114,17 @@ datasheets currently held in the project; anything not yet confirmed is marked.
 
 ---
 
-## 3. Design note: powering the VL53L0X array through the TCA9548A
+## 3. Design note: powering the VL53L4CD array through the TCA9548A
 
-The bare VL53L0X is a 2.8 V part whose signal pins top out at 3.6 V, while the Mega
-drives I2C at 5 V. Two viable paths:
-
-1. **Breakout boards with onboard regulator + level shifter** (common GY-530 /
-   "VL53L0XV2" style). If the modules already regulate and level-shift, they accept
-   a 5 V supply and 5 V I2C directly. **Confirm this for the exact modules on hand**
-   before connecting anything.
-2. **Bare modules via the TCA9548A as the translator.** The mux is built for exactly
-   this 5 V↔3.3 V case. Run the mux VCC and the downstream (sensor-side) pull-ups at
-   3.3 V, keep the upstream side compatible with the 5 V Mega bus (the mux inputs are
-   5 V-tolerant), and the part clamps each downstream channel to its pull-up voltage.
-
-The exact VCC and pull-up resistor values for path 2 should be worked through using
-the TCA9548A datasheet's design-requirements section (Vpass vs VCC curve, and the
-Rp(min)/Rp(max) equations against the bus capacitance of six channels). Treat the
-specific resistor selection as an open item, not a settled value — see
-`open-decisions.md`.
+The six VL53L4CD sensors all default to address 0x29, so the TCA9548A mux (0x70)
+provides per-sensor selection. The mux also handles level translation: its inputs
+are 5 V-tolerant, so it bridges the 5 V Mega bus to the sensor side regardless of
+whether the ZORZA breakouts are bare or carry an onboard regulator — one less thing
+to verify. Run the mux VCC and the downstream pull-ups to suit the sensor side, keep
+the upstream side compatible with the 5 V Mega bus, and select one channel at a time
+via the mux control register. Confirm the exact pull-up values against the TCA9548A
+datasheet's Rp(min)/Rp(max) equations versus the per-channel bus capacitance during
+bring-up. An optional OLED, if fitted, stays on the main bus **upstream** of the mux.
 
 ---
 
@@ -146,7 +135,7 @@ specific resistor selection as an open item, not a settled value — see
 - Arduino Mega 2560 full pinout (`A000067-full-pinout.pdf`).
 - RAMPS 1.4 manual / schematic (`RAMPS_1-4manual.pdf`).
 - TCA9548A datasheet, TI (`tca9548a.pdf`).
-- VL53L0X datasheet, ST DS11555 Rev 6 (`vl53l0x.pdf`).
+- VL53L4CD datasheet + ULD user manual, ST (to add — supersedes the old VL53L0X DS11555).
 - TMC2209 datasheet, Trinamic/ADI (`tmc2209_datasheet_rev1.09.pdf`).
 
 ### Source/purchase links captured (not a substitute for full datasheets)
@@ -156,6 +145,7 @@ specific resistor selection as an open item, not a settled value — see
 - TMC2209 StepStick pin config (Watterott): `https://learn.watterott.com/silentstepstick/pinconfig/tmc2209/`
 - Relay module stable product/listing URL: `https://www.amazon.com/dp/B0B8HF14T2`
 - L298N module stable product/listing URL: `https://www.amazon.com/dp/B07BK1QL5T`
+- ZORZA VL53L4CD breakout product page: `https://www.amazon.com/dp/B0F1S78FWV`
 - Hosyond SSD1309 OLED stable product/listing URL: `https://www.amazon.com/dp/B0G2RFLG1L`
 
 These purchase links should still be replaced with saved PDFs/screenshots or
@@ -163,24 +153,28 @@ manufacturer docs when available.
 
 ### Still needed
 
-- **Motion/drivers:** Teyleten V2.0 TMC2209 `PDN_UART`/`DIAG` pads confirmed exposed;
-  still needed are the module's Vref/current-limit formula and the 42BYGHW811
-  datasheet, plus a manual for any larger external driver (TB6600 / DM542 / DM556) if
-  the build moves to one (note: external drivers lose StallGuard).
+- **Motion/drivers:** Teyleten V2.0 TMC2209 `PDN_UART` confirmed exposed; still
+  needed are the module's Vref/current-limit formula and the 42BYGHW811 datasheet,
+  plus a manual for any larger external driver (TB6600 / DM542 / DM556) if the build
+  moves to one. Homing is by limit switches, so StallGuard is not a dependency.
 - **Vacuum/actuators:** **vacuum pump datasheet — still the most important gap**;
-  solenoid valve datasheet (if used); AEDIKO relay module page; MOSFET driver
-  module datasheet (if used); MG90S / MG90S-SV01 servo datasheet.
-- **Operator interface:** Hosyond SSD1309 OLED page + SSD1309 / U8g2 reference;
-  RGB status LED, program-loaded LED, beeper, and Start/Pause button parts.
+  solenoid valve datasheet; L298N module datasheet; AOD4184 MOSFET module datasheet;
+  MG90S / MG90S-SV01 servo datasheet.
+- **Sensors:** VL53L4CD datasheet + ULD user manual; the four homing limit-switch
+  part (contact rating, NC/NO).
+- **Operator interface:** Hosyond SSD1309 OLED page + SSD1309 / U8g2 reference (if
+  the optional display is fitted); beeper and Start/Pause button parts.
 - **Power/safety:** 12 V / 24 V supply spec; external 5 V servo/sensor supply spec;
   fuse/breaker/E-stop contact-block/safety-relay datasheets once selected; wire,
   connector, and terminal-block ratings for actuator power.
-- **Software libraries:** `TMCStepper` (UART + StallGuard), Servo, AccelStepper (or
-  chosen motion lib), a VL53L0X Arduino library, TCA9548A mux reference,
-  SSD1309/U8g2/Adafruit_GFX, ArduinoJson.
+- **Software libraries:** `TMCStepper` (UART), Servo, AccelStepper (or chosen motion
+  lib), a **VL53L4CD** library (Pololu `vl53l4cd-arduino` or STM32duino — *not*
+  VL53L0X), TCA9548A mux reference, SSD1309/U8g2/Adafruit_GFX, ArduinoJson.
 
-### VL53L0X API reference
+### VL53L4CD API reference
 
-The VL53L0X API user manual **UM2039** is referenced throughout the datasheet for
-calibration and ranging-mode control and should be added to the library; the bare
-datasheet is not enough to drive the sensor.
+The VL53L4CD is driven through ST's Ultra-Lite Driver (ULD) API; the Pololu and
+STM32duino Arduino libraries both wrap it. Add the ULD user manual to the library —
+the bare datasheet is not enough to configure range timing (relevant to the
+close-range validation noted in §2.3). The old VL53L0X UM2039 reference no longer
+applies.

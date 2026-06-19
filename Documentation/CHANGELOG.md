@@ -1,6 +1,42 @@
-## v1.2
+## v1.3 — firmware pivot: soft limits, jog-and-measure, doc reconciliation
 
-### GUI — ToF sensor offset calibration
+### Firmware — soft travel limits (host-tested)
+- New `config/TravelLimits.h`: dependency-free per-axis work envelope with the
+  single `offendingAxis()` bounds check; `Config::travelLimits()` builds it.
+- `Interpreter` enforces the envelope on every `MOVE` (waypoints + final target)
+  through one `guardedMove()` chokepoint; faults `soft_limit_<axis>` before the
+  target reaches the machine. Limits pushed from Config at `run_program`;
+  unconfigured (all-zero) = unbounded.
+- New `set_max_travel {axis, mm}` command (Idle/Ready) writes per-axis limit to
+  Config + EEPROM. New NACK `invalid_travel`.
+- `Command.calDistMm` unified to `Command.mm` (shared by `set_cal_distance` /
+  `set_max_travel`). `Protocol` parses the `mm` field (also fixes the previously
+  unwired `set_cal_distance` serial path).
+
+### Firmware — jog-and-measure calibration (host-tested), StallGuard retired
+- `IMachine::traverseToStop()` removed; replaced by `jogAxisSteps(axis, steps)`
+  (signed raw steps, bypasses steps/mm). `StubMachine`/`MockMachine` updated.
+- `calibrate_axis` no longer auto-traverses — it enters `CALIBRATING` and zeroes a
+  jog accumulator. New `cal_jog {axis, steps}` (CALIBRATING only) accumulates net
+  steps; `set_cal_distance` computes `steps_per_mm = |net_steps| / mm`. New reasons
+  `no_jog_steps`, `cal_jog_failed`; the `tick()` calibration traverse is gone.
+
+### Tests
+- Firmware host suite: **155 / 0** (state-machine 54, interpreter 77, config 24),
+  up from 137 → 153 → 155 across the soft-limit and calibration reworks.
+
+### Documentation — reconciled to post-pivot hardware
+- `pin-mapping.md` rewritten: limit-switch homing (X/Y1/Y2/Z on freed XSHUT block),
+  Start/Pause/E-stop on endstop headers, L298N pump + AOD4184 solenoid, servos
+  D4/D5, beeper D39, heartbeat LED D8, TMC UART D40, VL53L4CD×6 behind TCA9548A.
+- `communication-protocol.md`, `firmware-architecture.md`, `open-decisions.md`,
+  `architecture.md`, `components-and-references.md`, `README.md` updated for
+  limit-switch homing, jog-and-measure, VL53L4CD + mux, L298N/AOD4184 drivers, and
+  Config v4 soft limits. StallGuard and the no-mux VL53L0X/XSHUT plan retired.
+
+---
+
+
 
 **New `tab_sensor_cal.py` — `SensorCalTab`:**
 - New "Sensor Cal" tab between Service and Comms.

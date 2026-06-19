@@ -300,8 +300,14 @@ void test_full_transfer_in_multiple_chunks(void) {
 
 static Command calCmd(const char* name, CalAxis axis = CalAxis::X, float distMm = 0.0f) {
     Command c = cmd(name);
-    c.calAxis   = axis;
-    c.calDistMm = distMm;
+    c.calAxis = axis;
+    c.mm      = distMm;
+    return c;
+}
+static Command jogCmd(CalAxis axis, int32_t steps) {
+    Command c = cmd("cal_jog");
+    c.calAxis = axis;
+    c.steps   = steps;
     return c;
 }
 
@@ -325,23 +331,36 @@ void test_calibrate_axis_rejected_with_invalid_axis(void) {
     TEST_ASSERT_EQUAL_STRING("invalid_axis", r.reason);
 }
 
-void test_tick_drives_traverse_and_stores_steps(void) {
-    mm->traverseSteps = 12800;
+void test_cal_jog_accumulates_steps(void) {
     sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
-    sm->tick(0);
-    TEST_ASSERT_TRUE(sm->calTraverseDone());
+    sm->handleCommand(jogCmd(CalAxis::X, 8000), 0);
+    sm->handleCommand(jogCmd(CalAxis::X, 4800), 0);
     TEST_ASSERT_EQUAL(12800u, sm->calSteps());
-    // Still Calibrating — waiting for set_cal_distance.
+    // Stays Calibrating — waiting for set_cal_distance.
     TEST_ASSERT_TRUE(State::Calibrating == sm->state());
-    // Traverse was called with the right axis.
-    TEST_ASSERT_EQUAL(1u, mm->traversals.size());
-    TEST_ASSERT_EQUAL_STRING("X", mm->traversals[0].axis.c_str());
+    // Jog routed to the axis under calibration, in order.
+    TEST_ASSERT_EQUAL(2u, mm->jogs.size());
+    TEST_ASSERT_EQUAL_STRING("X", mm->jogs[0].axis.c_str());
+    TEST_ASSERT_EQUAL(8000, mm->jogs[0].steps);
+}
+
+void test_cal_jog_accumulates_signed_net(void) {
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
+    sm->handleCommand(jogCmd(CalAxis::X, 1000), 0);
+    sm->handleCommand(jogCmd(CalAxis::X, -200), 0);   // back off
+    TEST_ASSERT_EQUAL(800u, sm->calSteps());          // net magnitude
+}
+
+void test_cal_jog_rejected_outside_calibrating(void) {
+    // Never started calibration.
+    Response r = sm->handleCommand(jogCmd(CalAxis::X, 1000), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+    TEST_ASSERT_EQUAL(0u, mm->jogs.size());
 }
 
 void test_set_cal_distance_computes_steps_per_mm(void) {
-    mm->traverseSteps = 12800;
     sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
-    sm->tick(0);   // traverse completes
+    sm->handleCommand(jogCmd(CalAxis::X, 12800), 0);
 
     Response r = sm->handleCommand(calCmd("set_cal_distance", CalAxis::X, 160.0f), 0);
     TEST_ASSERT_EQUAL(Response::Ack, r.kind);
@@ -350,12 +369,20 @@ void test_set_cal_distance_computes_steps_per_mm(void) {
     TEST_ASSERT_EQUAL_FLOAT(80.0f, sm->stepsPerMm(CalAxis::X));
 }
 
-void test_set_cal_distance_rejected_before_traverse(void) {
+void test_set_cal_distance_clears_accumulator(void) {
     sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
-    // tick() NOT called — traverse not done yet
+    sm->handleCommand(jogCmd(CalAxis::X, 12800), 0);
+    sm->handleCommand(calCmd("set_cal_distance", CalAxis::X, 160.0f), 0);
+    // After applying, the jog accumulator resets so status no longer reports it.
+    TEST_ASSERT_EQUAL(0u, sm->calSteps());
+}
+
+void test_set_cal_distance_rejected_before_jog(void) {
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
+    // no cal_jog yet -> nothing to divide
     Response r = sm->handleCommand(calCmd("set_cal_distance", CalAxis::X, 160.0f), 0);
     TEST_ASSERT_EQUAL(Response::Nack, r.kind);
-    TEST_ASSERT_EQUAL_STRING("traverse_not_done", r.reason);
+    TEST_ASSERT_EQUAL_STRING("no_jog_steps", r.reason);
 }
 
 void test_set_cal_distance_rejected_outside_calibrating(void) {
@@ -365,9 +392,8 @@ void test_set_cal_distance_rejected_outside_calibrating(void) {
 }
 
 void test_calibrate_z_axis_independently(void) {
-    mm->traverseSteps = 6400;
     sm->handleCommand(calCmd("calibrate_axis", CalAxis::Z), 0);
-    sm->tick(0);
+    sm->handleCommand(jogCmd(CalAxis::Z, 6400), 0);
     sm->handleCommand(calCmd("set_cal_distance", CalAxis::Z, 200.0f), 0);
     // 6400 / 200 = 32.0 steps/mm
     TEST_ASSERT_EQUAL_FLOAT(32.0f, sm->stepsPerMm(CalAxis::Z));
@@ -375,14 +401,14 @@ void test_calibrate_z_axis_independently(void) {
     TEST_ASSERT_EQUAL_FLOAT(0.0f, sm->stepsPerMm(CalAxis::X));
 }
 
-void test_traverse_fault_enters_faulted_state(void) {
-    // We can simulate a fault by injecting it directly — traverseToStop
-    // returning Faulted is tested here by injecting a fault after tick.
-    // Full HAL fault path is validated on the bench.
+void test_cal_jog_fault_enters_faulted_state(void) {
+    mm->jogResult = OpResult::Faulted;   // force the HAL jog to fail
     sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
-    sm->injectFault("cal_traverse_failed");
+    Response r = sm->handleCommand(jogCmd(CalAxis::X, 1000), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+    TEST_ASSERT_EQUAL_STRING("cal_jog_failed", r.reason);
     TEST_ASSERT_TRUE(State::Faulted == sm->state());
-    TEST_ASSERT_EQUAL_STRING("cal_traverse_failed", sm->fault());
+    TEST_ASSERT_EQUAL_STRING("cal_jog_failed", sm->fault());
 }
 // ============================================================
 // calibrate_sensors and get_param
@@ -482,17 +508,122 @@ void test_get_param_unknown_key_has_no_value(void) {
     TEST_ASSERT_FALSE(r.hasParamValue);
 }
 
+void test_get_param_echoes_actual_key(void) {
+    // Regression: the key field must be the param key, not the command name.
+    cfg->stepsPerMmX = 80.0f;
+    Response r = sm->handleCommand(getParam("steps_per_mm_x"), 0);
+    TEST_ASSERT_TRUE(r.hasParamValue);
+    TEST_ASSERT_EQUAL_STRING("steps_per_mm_x", r.paramKey);
+}
+
+void test_get_param_legacy_steps_per_mm_y_maps_to_y1(void) {
+    cfg->stepsPerMmY1 = 33.0f;
+    Response r = sm->handleCommand(getParam("steps_per_mm_y"), 0);
+    TEST_ASSERT_TRUE(r.hasParamValue);
+    TEST_ASSERT_EQUAL_FLOAT(33.0f, r.paramValue);
+}
+
+void test_get_param_max_travel_x(void) {
+    cfg->maxTravelMmX = 250.0f;
+    Response r = sm->handleCommand(getParam("max_travel_mm_x"), 0);
+    TEST_ASSERT_TRUE(r.hasParamValue);
+    TEST_ASSERT_EQUAL_FLOAT(250.0f, r.paramValue);
+    TEST_ASSERT_EQUAL_STRING("max_travel_mm_x", r.paramKey);
+}
+
+void test_get_param_max_travel_y_and_z(void) {
+    cfg->maxTravelMmY = 410.0f;
+    cfg->maxTravelMmZ = 75.0f;
+    Response ry = sm->handleCommand(getParam("max_travel_mm_y"), 0);
+    Response rz = sm->handleCommand(getParam("max_travel_mm_z"), 0);
+    TEST_ASSERT_EQUAL_FLOAT(410.0f, ry.paramValue);
+    TEST_ASSERT_EQUAL_FLOAT(75.0f, rz.paramValue);
+}
+
 
 void test_calibrate_y2_independently(void) {
-    mm->traverseSteps = 12750;
     sm->handleCommand(calCmd("calibrate_axis", CalAxis::Y2), 0);
-    sm->tick(0);
+    sm->handleCommand(jogCmd(CalAxis::Y2, 12750), 0);
     sm->handleCommand(calCmd("set_cal_distance", CalAxis::Y2, 420.0f), 0);
     // 12750 / 420 ≈ 30.357
     float expected = 12750.0f / 420.0f;
     TEST_ASSERT_EQUAL_FLOAT(expected, sm->stepsPerMm(CalAxis::Y2));
     // Y1 unchanged
     TEST_ASSERT_EQUAL_FLOAT(0.0f, sm->stepsPerMm(CalAxis::Y1));
+}
+
+// ============================================================
+// set_max_travel + soft-limit enforcement
+// ============================================================
+
+void test_set_max_travel_writes_x(void) {
+    Response r = sm->handleCommand(calCmd("set_max_travel", CalAxis::X, 300.0f), 0);
+    TEST_ASSERT_EQUAL(Response::Ack, r.kind);
+    TEST_ASSERT_EQUAL_FLOAT(300.0f, cfg->maxTravelMmX);
+}
+
+void test_set_max_travel_y1_and_y2_set_single_y_envelope(void) {
+    sm->handleCommand(calCmd("set_max_travel", CalAxis::Y1, 410.0f), 0);
+    TEST_ASSERT_EQUAL_FLOAT(410.0f, cfg->maxTravelMmY);
+    // Y2 targets the same per-axis envelope (not a separate field).
+    sm->handleCommand(calCmd("set_max_travel", CalAxis::Y2, 420.0f), 0);
+    TEST_ASSERT_EQUAL_FLOAT(420.0f, cfg->maxTravelMmY);
+}
+
+void test_set_max_travel_rejects_invalid_axis(void) {
+    Response r = sm->handleCommand(calCmd("set_max_travel", CalAxis::Invalid, 300.0f), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+    TEST_ASSERT_EQUAL_STRING("invalid_axis", r.reason);
+}
+
+void test_set_max_travel_rejects_nonpositive(void) {
+    Response r = sm->handleCommand(calCmd("set_max_travel", CalAxis::X, 0.0f), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+    TEST_ASSERT_EQUAL_STRING("invalid_travel", r.reason);
+}
+
+void test_set_max_travel_persists_to_eeprom(void) {
+    sm->handleCommand(calCmd("set_max_travel", CalAxis::Z, 75.0f), 0);
+    pnp::Config reloaded;
+    TEST_ASSERT_TRUE(reloaded.load());
+    TEST_ASSERT_EQUAL_FLOAT(75.0f, reloaded.maxTravelMmZ);
+}
+
+void test_set_max_travel_rejected_while_running(void) {
+    sm->handleCommand(cmd("home"), 0);
+    sm->tick(StateMachine::kHomingMs);   // -> READY
+    doTransfer();
+    sm->handleCommand(cmd("run_program"), 0);   // -> RUNNING
+    Response r = sm->handleCommand(calCmd("set_max_travel", CalAxis::X, 300.0f), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+}
+
+void test_program_move_outside_envelope_faults(void) {
+    // Configure limits, then run a program whose MOVE exceeds X.
+    cfg->maxTravelMmX = 300.0f;
+    cfg->maxTravelMmY = 400.0f;
+    cfg->maxTravelMmZ = 50.0f;
+    sm->handleCommand(cmd("home"), 0);
+    sm->tick(StateMachine::kHomingMs);   // -> READY
+    doTransfer("{\"version\":1,\"program\":[{\"op\":\"MOVE\",\"x\":999,\"y\":0,\"z\":0}]}");
+    sm->handleCommand(cmd("run_program"), 0);
+    sm->tick(0);
+    TEST_ASSERT_TRUE(State::Faulted == sm->state());
+    TEST_ASSERT_EQUAL_STRING("soft_limit_x", sm->fault());
+}
+
+void test_program_move_inside_envelope_runs(void) {
+    cfg->maxTravelMmX = 300.0f;
+    cfg->maxTravelMmY = 400.0f;
+    cfg->maxTravelMmZ = 50.0f;
+    sm->handleCommand(cmd("home"), 0);
+    sm->tick(StateMachine::kHomingMs);   // -> READY
+    doTransfer("{\"version\":1,\"program\":[{\"op\":\"MOVE\",\"x\":100,\"y\":100,\"z\":10},"
+               "{\"op\":\"HALT\"}]}");
+    sm->handleCommand(cmd("run_program"), 0);
+    sm->tick(0);
+    TEST_ASSERT_TRUE(State::Idle == sm->state());   // completed, no fault
+    TEST_ASSERT_EQUAL(1u, mm->moves.size());
 }
 
 int main(void) {
@@ -525,13 +656,24 @@ int main(void) {
     RUN_TEST(test_calibrate_axis_enters_calibrating_state);
     RUN_TEST(test_calibrate_axis_rejected_when_homing);
     RUN_TEST(test_calibrate_axis_rejected_with_invalid_axis);
-    RUN_TEST(test_tick_drives_traverse_and_stores_steps);
+    RUN_TEST(test_cal_jog_accumulates_steps);
+    RUN_TEST(test_cal_jog_accumulates_signed_net);
+    RUN_TEST(test_cal_jog_rejected_outside_calibrating);
     RUN_TEST(test_set_cal_distance_computes_steps_per_mm);
-    RUN_TEST(test_set_cal_distance_rejected_before_traverse);
+    RUN_TEST(test_set_cal_distance_clears_accumulator);
+    RUN_TEST(test_set_cal_distance_rejected_before_jog);
     RUN_TEST(test_set_cal_distance_rejected_outside_calibrating);
     RUN_TEST(test_calibrate_z_axis_independently);
     RUN_TEST(test_calibrate_y2_independently);
-    RUN_TEST(test_traverse_fault_enters_faulted_state);
+    RUN_TEST(test_set_max_travel_writes_x);
+    RUN_TEST(test_set_max_travel_y1_and_y2_set_single_y_envelope);
+    RUN_TEST(test_set_max_travel_rejects_invalid_axis);
+    RUN_TEST(test_set_max_travel_rejects_nonpositive);
+    RUN_TEST(test_set_max_travel_persists_to_eeprom);
+    RUN_TEST(test_set_max_travel_rejected_while_running);
+    RUN_TEST(test_program_move_outside_envelope_faults);
+    RUN_TEST(test_program_move_inside_envelope_runs);
+    RUN_TEST(test_cal_jog_fault_enters_faulted_state);
 
     // calibrate_sensors + get_param
     RUN_TEST(test_calibrate_sensors_stores_readings_to_config);
@@ -545,5 +687,9 @@ int main(void) {
     RUN_TEST(test_get_param_tof_offset_3);
     RUN_TEST(test_get_param_uncalibrated_returns_negative);
     RUN_TEST(test_get_param_unknown_key_has_no_value);
+    RUN_TEST(test_get_param_echoes_actual_key);
+    RUN_TEST(test_get_param_legacy_steps_per_mm_y_maps_to_y1);
+    RUN_TEST(test_get_param_max_travel_x);
+    RUN_TEST(test_get_param_max_travel_y_and_z);
     return UNITY_END();
 }

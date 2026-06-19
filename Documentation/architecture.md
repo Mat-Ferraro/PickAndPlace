@@ -32,7 +32,7 @@ from a GPIO, the 5 V pin, the 3.3 V pin, VIN, or USB.
 | X | 1 | Single stepper |
 | Y | 2 | Dual steppers (paired gantry drive) |
 | Z | 1 | Single stepper |
-| **Total** | **4** | Fits RAMPS X/Y/Z/E0 sockets |
+| **Total** | **4** | X/Y sockets + E0 (Y2) + E1 (Z); Z socket unused |
 
 The machine is a **Cartesian gantry** (X / dual-Y / Z) — confirmed, not an
 articulated/SCARA arm. The motor count, pin tables, homing, and jog/teach interface
@@ -45,17 +45,18 @@ final load.
 
 ### Stepper drivers
 
-Preferred: TMC2209 StepStick, run in **UART mode** (committed — not deferred). UART
-lets the firmware set current/microstepping in software and read **StallGuard4**
-load for sensorless homing and jam detection (see §7 and §11). All four drivers
-share one single-wire UART bus, addressed individually via their MS1/MS2 jumpers.
-Alternatives if the StepSticks run hot or lack torque at ~2.5 A/phase: external
-TB6600 / DM542 / DM556 (but those lose StallGuard, so sensorless homing would need
-rethinking).
+Preferred: TMC2209 StepStick, run in **UART mode** (committed). UART lets the
+firmware set current/microstepping in software over a single half-duplex bus shared
+by all four drivers (addressed via MS1/MS2 jumpers). **Homing is by limit switches,
+not StallGuard** (see §7) — the `DIAG`/StallGuard4 path has been retired, so UART is
+used purely for current/microstep configuration. Alternatives if the StepSticks run
+hot or lack torque at ~2.5 A/phase: external TB6600 / DM542 / DM556 (still fine,
+since homing no longer depends on StallGuard).
 
-The two Y motors (Y1, Y2) are driven **independently** — Y2 from the E0 socket with
-its own STEP/DIR — so the gantry is squared by homing each Y side to its own stall
-rather than slaving them. See `open-decisions.md` and `pin-mapping.md`.
+The two Y motors (Y1, Y2) are driven **independently** — Y1 on the Y socket, Y2 on
+the E0 socket, each with its own STEP/DIR — so the gantry is squared by homing each
+Y side to **its own limit switch** rather than slaving them. Z is on the E1 socket;
+the Z socket is unused. See `open-decisions.md` and `pin-mapping.md`.
 
 **Driver safety rules:** insert drivers only with USB and motor power disconnected;
 verify orientation before power; align the motor-output side with the RAMPS labels
@@ -81,36 +82,36 @@ current limit before sustained motion; add cooling if drivers or motors run hot.
 
 ## 4. Sensors
 
-### 4.1 ToF array (6× VL53L0X)
+### 4.1 ToF array (6× VL53L4CD)
 
 | Sensor | Purpose |
 |---|---|
-| TOF-1..4 | Pickup verification, one per pickup corner |
-| TOF-5 | Laser-head home verification |
-| TOF-6 | Remaining-material detection |
+| ch0–3 | Pickup verification, one per pickup corner |
+| ch4 | Laser-head home verification |
+| ch5 | Remaining-material detection |
 
-All six VL53L0X share the same default I2C address. The datasheet expresses it as
-**0x52** in 8-bit notation, while Arduino `Wire` code normally uses **0x29** as the
-7-bit address [ref: VL53L0X]. The **TCA9548A mux is required** to address the
-sensors individually. The mux approach is preferred over XSHUT address-reassignment
-for six identical sensors.
+All six **VL53L4CD** share the default I2C address **0x29** [ref: VL53L4CD], so the
+**TCA9548A mux (0x70) is required** to address them — each sensor sits on its own
+mux channel and the firmware selects one at a time. No per-sensor XSHUT lines are
+needed. The VL53L4CD is a **1 mm-class** ranger (up to ~1.3 m), so no sensor recess
+is required (validate close-range behaviour on the bench — some setups floor at
+~70 mm until range timing is configured).
 
-**Voltage:** the bare VL53L0X is a ~2.8 V part with **3.6 V-max signal pins — not
-5 V-tolerant** [ref: VL53L0X]. Either use breakout boards that include a regulator
-and level shifter, or use the TCA9548A as the level translator (it is 5 V-tolerant
-and translation-capable [ref: TCA9548A]). The exact translation wiring is an open
-item — see `components-and-references.md` §3 and `open-decisions.md`.
+**Library:** use a dedicated **VL53L4CD** driver (Pololu `vl53l4cd-arduino` or
+STM32duino). The sensor uses a 16-bit register map and is **not** compatible with
+VL53L0X/VL53L1X libraries [ref: VL53L4CD]. The mux (5 V-tolerant inputs) also bridges
+the 5 V Mega bus to the sensor side, so it doubles as the level translator.
 
 ### 4.2 TCA9548A mux topology
 
 ```
 Mega/RAMPS I2C (5 V) ── TCA9548A (addr 0x70)
-                          ├─ Ch0 → TOF-1
-                          ├─ Ch1 → TOF-2
-                          ├─ Ch2 → TOF-3
-                          ├─ Ch3 → TOF-4
-                          ├─ Ch4 → TOF-5
-                          ├─ Ch5 → TOF-6
+                          ├─ Ch0 → ToF ch0 (pickup)
+                          ├─ Ch1 → ToF ch1 (pickup)
+                          ├─ Ch2 → ToF ch2 (pickup)
+                          ├─ Ch3 → ToF ch3 (pickup)
+                          ├─ Ch4 → ToF ch4 (laser home)
+                          ├─ Ch5 → ToF ch5 (material)
                           └─ Ch6,7 → spare
 ```
 
@@ -141,37 +142,32 @@ One vacuum pump plus one vacuum-release mechanism.
 Pickup is verified by the four pickup ToF sensors rather than vacuum pressure alone
 (a pressure sensor could be added later).
 
-**Driver candidates:** a 12 V relay (acceptable for early ON/OFF testing; verify
-trigger voltage, contact rating, current, add suppression); a logic-level MOSFET
-module (preferred for a DC pump if within rating, supports PWM); the L298N (bench
-experiments only, not preferred); or a **RAMPS MOSFET output** — now more plausible
-since the RAMPS power MOSFETs are logic-level STP55NF06L parts [ref: RAMPS manual],
-pending a current-path/connector/fuse check (RAMPS outputs are gated by ~5 A/~11 A
-polyfuses). See `open-decisions.md`.
+**Drivers (committed, bench-tested):** the pump runs on an **L298N H-bridge** (IN1
+D23, IN2 D25, ENA D11/PWM — speed-controllable); the solenoid valve runs on an
+**AOD4184 MOSFET module** as a low-side switch (PWM D6), with a flyback diode at the
+solenoid. The earlier relay / RAMPS-MOSFET options are dropped. See `pin-mapping.md`
+§5.
 
 ## 7. Homing and travel limits
 
-**Homing is sensorless**, using TMC2209 StallGuard4: each axis is driven into a
-solid mechanical hard stop and the resulting motor stall (reported on the driver's
-`DIAG` pin) is taken as the home reference. This removes the physical min-endstop
-switches and frees the RAMPS endstop headers to carry the `DIAG` lines and the
-E-stop (see `pin-mapping.md` §3).
+**Homing uses four mechanical limit switches**, one per motor (X, Y1, Y2, Z), driven
+into at homing speed and **polled** (no interrupt needed — only E-stop needs that).
+NC contacts with `INPUT_PULLUP` are preferred so a broken wire fails safe. The switch
+position is the home reference (0). Switches use the freed ToF-XSHUT GPIO block
+(D27/D29/D31/D33) — see `pin-mapping.md` §3.
 
-- **Sequence:** axes home one at a time, so X and Z can share a single OR'd `DIAG`
-  line. The two Y motors home **independently** to square the gantry — each Y side
-  is driven to its own stall on a **separate** `DIAG` line, so the firmware stops
-  each side individually and corrects racking on every home.
-- **Travel limits:** after homing, software travel limits bound commanded motion; a
-  `MOVE` outside the envelope faults at runtime. Optional hard limit switches on the
-  spare Y_MIN/Y_MAX headers can back the mechanical stops.
-- **Tuning:** StallGuard sensitivity (`SGTHRS`) is tuned per axis, and **per Y side**
-  for squaring — differing friction/load between the two sides can square the gantry
-  crooked, so each side's threshold is calibrated and squareness validated on
-  hardware. StallGuard needs a minimum velocity (`TCOOLTHRS`) to read load, so it
-  protects transit moves but not very slow ones (those rely on ToF, e.g. `PROBE_Z`).
+- **Sequence:** axes home one at a time. The two Y motors home **independently** to
+  **separate limit switches**, so the firmware stops each side at its own switch and
+  squares the gantry on every home.
+- **Travel limits:** after homing (position 0), per-axis soft travel limits bound
+  commanded motion — the usable envelope is `[0, maxTravelMm]` and a `MOVE` outside
+  it faults at runtime (`soft_limit_<axis>`). The limits are operator-entered
+  (`set_max_travel`) and stored in Config v4; this is what protects the far end of
+  travel now that StallGuard is gone. Steps/mm is set by **jog-and-measure**
+  (`calibrate_axis` → `cal_jog` → `set_cal_distance`).
 
-Remaining open items (home direction/speeds, backoff, whether to fit the optional
-hard-limit switches) are tracked in `open-decisions.md`.
+Remaining open items (home direction/speeds, backoff, debounce) are tracked in
+`open-decisions.md`.
 
 ## 8. Machine positions and states
 
@@ -239,6 +235,11 @@ with an error indication rather than running.
 The onboard Mega LED is hidden under the shield, so status is shown on external
 indicators driven from GPIO:
 
+> **v1.0 scope:** only a single green **heartbeat LED** on the RAMPS board (D8,
+> ~1 Hz blink = "firmware alive") is fitted; the full RGB scheme below is the
+> designed target, deferred past v1.0. The beeper and the GUI carry the rest of the
+> status signalling for now.
+
 - **RGB status LED** — machine state by colour, with blink reserved for
   attention/transient states (e.g. green = READY, green slow-blink = READY-but-no-
   program, green fast-blink/blue = RUNNING, amber-blink = PAUSED, red-blink =
@@ -257,7 +258,8 @@ a re-home is required). **Software is not the primary safety mechanism.** The fi
 design must include a hardware-enforced circuit that removes power/enable from
 hazardous actuators independent of firmware; the software state is for diagnostics,
 handling, and reporting. E-stop is wired to a Mega hardware-interrupt pin
-(D2/D3/D18/D19 [ref: Mega pinout]); the assignment is X_MIN/D3 (INT5).
+(D2/D3/D18/D19 [ref: Mega pinout]); the assignment is Z_MIN/D18 (INT3). The Start
+and Pause buttons take X_MIN/D3 and Y_MIN/D14.
 
 ### 9.4 Laser interlock
 
@@ -307,14 +309,14 @@ active headless; state transitions are logged/reported.
    (object no longer detected), raise `pickup_lost` and stop motion immediately.
    This catches workpieces dropped mid-transit and arm moves with nothing grabbed.
 
-3. **Stall / jam detection (StallGuard).** During transit moves, the TMC2209
-   `DIAG` lines flag a motor stall (jam, obstruction, or unexpected hard stop). A
-   trip aborts motion and raises `motion_fault` with the offending axis. StallGuard
-   needs a minimum velocity, so it covers transit moves but not very slow ones;
-   slow precision moves (e.g. `PROBE_Z`) are covered by ToF instead. Steppers are
-   open-loop, so this is the primary defence against silent lost steps — a software
-   move-duration timeout cannot catch a jam, because step generation continues on
-   schedule regardless of whether the motor turned.
+3. **Lost-step exposure (no in-motion jam detection).** With StallGuard retired,
+   there is **no automatic mid-travel jam/stall detection** — steppers are open-loop
+   and a software move-duration timeout cannot catch a jam (step generation continues
+   regardless of whether the motor turned). Homing is protected by the limit
+   switches and the work envelope by the soft travel limits, but a mid-move
+   obstruction is not caught in firmware for v1.0. ToF still covers slow precision
+   moves (e.g. `PROBE_Z`). Re-introducing closed-loop or end-of-travel jam detection
+   is a possible future addition — see `open-decisions.md`.
 
 All three faults transition the machine to FAULTED, halt the program executor, and
 require an explicit `reset_fault` + `home` before resuming. None can be caught
@@ -343,14 +345,15 @@ Windows GUI
 Arduino Mega 2560
    │
 RAMPS 1.4
-   ├─ TMC2209 drivers → X, Y1, Y2, Z steppers
-   ├─ Endstop / button inputs
-   ├─ Servo header (vacuum release)
-   ├─ MOSFET outputs (pump / valve)  [logic-level STP55NF06L]
+   ├─ TMC2209 drivers (UART) → X, Y1, Y2, Z steppers
+   ├─ Limit switches → X, Y1, Y2, Z homing
+   ├─ Endstop headers → Start / Pause buttons + latched E-stop
+   ├─ Servo headers → door + laser-button servos
+   ├─ L298N H-bridge → vacuum pump   |  AOD4184 MOSFET → solenoid valve
    └─ I2C (5 V)
         ├─ SSD1309 OLED (optional, upstream)
         └─ TCA9548A mux (0x70)
-             └─ 6× VL53L0X (datasheet 0x52 / Arduino 0x29, one per channel)
+             └─ 6× VL53L4CD (all 0x29, one per channel ch0–5)
 ```
 
 ## 14. GUI responsibilities

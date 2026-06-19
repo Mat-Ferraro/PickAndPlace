@@ -17,13 +17,8 @@ class StubMachine : public IMachine {
   bool     readSensor(const char*) override { return false; }
   OpResult delayMs(uint32_t) override { return OpResult::Ok; }
   void     log(const char*) override {}
-  // Returns axis-appropriate fake step count for calibration testing.
-  OpResult traverseToStop(const char* axis, uint32_t& outSteps) override {
-    // Distinct values per axis so tests can verify routing.
-    if (axis[0]=='X')                   outSteps = 12800;
-    else if (axis[0]=='Y'&&axis[1]=='1') outSteps = 12800;
-    else if (axis[0]=='Y'&&axis[1]=='2') outSteps = 12750;  // slight difference
-    else                                 outSteps =  6400;  // Z
+  // Records nothing; jog is a no-op on the stub. Returns Ok.
+  OpResult jogAxisSteps(const char* /*axis*/, int32_t /*steps*/) override {
     return OpResult::Ok;
   }
   OpResult readDistanceMm(uint8_t, float& outMm) override {

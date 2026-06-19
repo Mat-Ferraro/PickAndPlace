@@ -19,9 +19,13 @@ class IMachine {
   virtual OpResult delayMs(uint32_t ms) = 0;
   virtual void     log(const char* msg) = 0;
 
-  // Drive one axis to its far hard stop via StallGuard, counting steps.
+  // Jog one motor by a raw, uncalibrated step count (signed: + / - chooses
+  // direction). Used by jog-and-measure calibration — it deliberately bypasses
+  // steps/mm because that is the value being calibrated. The operator jogs a
+  // known number of steps, measures the physical distance moved, and the
+  // firmware computes steps/mm from the two.
   // axis: "X", "Y1", "Y2", or "Z"  (Y1 = Y socket, Y2 = E0 socket)
-  virtual OpResult traverseToStop(const char* axis, uint32_t& outSteps) = 0;
+  virtual OpResult jogAxisSteps(const char* axis, int32_t steps) = 0;
 
   // Read raw ToF distance for one arm pickup channel (0-3) in mm.
   virtual OpResult readDistanceMm(uint8_t channel, float& outMm) = 0;

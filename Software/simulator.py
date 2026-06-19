@@ -71,7 +71,9 @@ COMMAND_STATES: Dict[str, set] = {
     "set_output":     {State.IDLE, State.READY},
     "set_servo":      {State.IDLE, State.READY},
     "calibrate_axis":     {State.IDLE, State.READY},
+    "cal_jog":            {State.CALIBRATING},
     "set_cal_distance":   {State.CALIBRATING},
+    "set_max_travel":     {State.IDLE, State.READY},
     "calibrate_sensors":  {State.IDLE, State.READY},
 }
 
@@ -132,10 +134,12 @@ class MachineState:
     xfer_size:     int   = 0
     xfer_chunks:   int   = 0
     xfer_received: int   = 0
-    # Stepper calibration
+    # Stepper calibration (jog-and-measure)
     cal_axis:      str   = ""
-    cal_raw_steps: int   = 0
+    cal_jog_steps: int   = 0      # net steps jogged this session (signed)
     steps_per_mm:  dict  = field(default_factory=lambda: {"X":0.0,"Y":0.0,"Z":0.0})
+    # Per-axis soft travel limits (mm); 0 = not configured.
+    max_travel_mm: dict  = field(default_factory=lambda: {"X":0.0,"Y":0.0,"Z":0.0})
     tof_offsets:   list  = field(default_factory=lambda: [None, None, None, None])
     params: Dict[str, Any] = field(default_factory=lambda: {
         "laser_interlock_mode":        0,
@@ -182,6 +186,20 @@ class MachineState:
 # Simulated machine
 # ---------------------------------------------------------------------------
 
+def travel_violation(limits: dict, x: float, y: float, z: float):
+    """Return the offending axis ('x'/'y'/'z') if (x,y,z) is outside
+    [0, maxTravel] on any axis, else None. Only enforced when all three axes
+    are configured (>0), matching the firmware's Config.hasTravelLimits() gate;
+    an unconfigured envelope is unbounded. Small epsilon tolerates float noise."""
+    if not all(limits.get(a, 0.0) > 0.0 for a in ("X", "Y", "Z")):
+        return None
+    eps = 1e-3
+    for label, val, mx in (("x", x, limits["X"]), ("y", y, limits["Y"]), ("z", z, limits["Z"])):
+        if val < -eps or val > mx + eps:
+            return label
+    return None
+
+
 class SimulatedMachine(MachineInterface):
     MOVE_SPEED    = 25.0   # mm/s at 100%
     MIN_MOVE_S   = 1.5    # minimum seconds per move (makes sim transitions visible)
@@ -195,6 +213,12 @@ class SimulatedMachine(MachineInterface):
 
     def move_to(self, x, y, z, stop_event, speed_pct=80):
         ms    = self._ms
+        # Soft travel limits: mirrors the firmware's guardedMove chokepoint.
+        # Only enforced once all three axes are configured (matches Config
+        # hasTravelLimits()); an unconfigured envelope leaves motion unbounded.
+        axis = travel_violation(ms.max_travel_mm, x, y, z)
+        if axis:
+            raise ProgramFault(f"soft_limit_{axis}")
         speed = max(self.MOVE_SPEED * speed_pct / 100.0, 1.0)
         dist  = max(abs(x - ms.x_mm), abs(y - ms.y_mm), abs(z - ms.z_mm))
         dur   = max(dist / speed if dist > 0.1 else 0.1, self.MIN_MOVE_S)
@@ -307,7 +331,6 @@ class StateMachine:
         self._pause_event = threading.Event()
         self._stop_event  = threading.Event()
         self._homing_done_at: Optional[float] = None
-        self._cal_done_at:    Optional[float] = None
 
     # ---- External API -----------------------------------------------------
 
@@ -341,12 +364,8 @@ class StateMachine:
             self._homing_done_at = None
 
     def _tick_calibrating(self):
-        if (self.ms.state == State.CALIBRATING and self._cal_done_at and
-                time.monotonic() >= self._cal_done_at):
-            # Simulate a traverse: fake steps based on axis
-            fake_steps = {"X": 12800, "Y": 12800, "Z": 6400}
-            self.ms.cal_raw_steps = fake_steps.get(self.ms.cal_axis, 3200)
-            self._cal_done_at = None   # stay CALIBRATING, await set_cal_distance
+        # Jog-and-measure is command-driven (cal_jog); nothing to tick here.
+        return
 
     def _tick_interpreter(self):
         if self._interp:
@@ -561,6 +580,9 @@ class StateMachine:
         x,y,z = m.get("x_mm"), m.get("y_mm"), m.get("z_mm")
         if None in (x,y,z):
             self.send({"type":"nack","id":i,"cmd":"move_to","reason":"invalid_param"}); return
+        axis = travel_violation(self.ms.max_travel_mm, float(x), float(y), float(z))
+        if axis:
+            self.send({"type":"nack","id":i,"cmd":"move_to","reason":f"soft_limit_{axis}"}); return
         self.ms.x_mm,self.ms.y_mm,self.ms.z_mm = float(x),float(y),float(z)
         self.send({"type":"ack","id":i,"cmd":"move_to"})
 
@@ -590,6 +612,11 @@ class StateMachine:
         if k in cal_map:
             axis = cal_map[k]
             val  = self.ms.steps_per_mm.get(axis, 0.0)
+            self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":val}); return
+        # Soft travel limit params
+        travel_map = {"max_travel_mm_x": "X", "max_travel_mm_y": "Y", "max_travel_mm_z": "Z"}
+        if k in travel_map:
+            val = self.ms.max_travel_mm.get(travel_map[k], 0.0)
             self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":val}); return
         # ToF offset params
         if k and k.startswith("tof_offset_"):
@@ -676,26 +703,49 @@ class StateMachine:
 
     def _cmd_calibrate_axis(self, i, m):
         axis = str(m.get("axis", "X")).upper()
+        if axis == "Y1" or axis == "Y2":   # firmware per-motor names map to Y here
+            axis = "Y"
         if axis not in ("X", "Y", "Z"):
             self.send({"type":"nack","id":i,"cmd":"calibrate_axis","reason":"invalid_axis"}); return
         self.ms.cal_axis = axis
-        self.ms.cal_raw_steps = 0
+        self.ms.cal_jog_steps = 0
         self.ms.set_state(State.CALIBRATING)
-        self._cal_done_at = time.monotonic() + 2.0   # 2s simulated traverse
         self.send({"type":"ack","id":i,"cmd":"calibrate_axis"})
 
+    def _cmd_cal_jog(self, i, m):
+        # Jog the axis under calibration by a raw step count and accumulate.
+        try:
+            steps = int(m.get("steps", 0))
+        except (TypeError, ValueError):
+            self.send({"type":"nack","id":i,"cmd":"cal_jog","reason":"invalid_param"}); return
+        self.ms.cal_jog_steps += steps
+        self.send({"type":"ack","id":i,"cmd":"cal_jog"})
+
     def _cmd_set_cal_distance(self, i, m):
-        if self.ms.cal_raw_steps == 0:
-            self.send({"type":"nack","id":i,"cmd":"set_cal_distance","reason":"traverse_not_done"}); return
+        net = abs(self.ms.cal_jog_steps)
+        if net == 0:
+            self.send({"type":"nack","id":i,"cmd":"set_cal_distance","reason":"no_jog_steps"}); return
         dist = float(m.get("mm", 0))
         if dist <= 0:
             self.send({"type":"nack","id":i,"cmd":"set_cal_distance","reason":"invalid_distance"}); return
         axis = self.ms.cal_axis or str(m.get("axis","X")).upper()
-        self.ms.steps_per_mm[axis] = self.ms.cal_raw_steps / dist
-        self.ms.cal_raw_steps = 0
+        self.ms.steps_per_mm[axis] = net / dist
+        self.ms.cal_jog_steps = 0
         self.ms.cal_axis = ""
         self.ms.set_state(State.IDLE)
         self.send({"type":"ack","id":i,"cmd":"set_cal_distance"})
+
+    def _cmd_set_max_travel(self, i, m):
+        axis = str(m.get("axis", "")).upper()
+        if axis in ("Y1", "Y2"):   # per-motor names map to the single Y envelope
+            axis = "Y"
+        if axis not in ("X", "Y", "Z"):
+            self.send({"type":"nack","id":i,"cmd":"set_max_travel","reason":"invalid_axis"}); return
+        mm = float(m.get("mm", 0))
+        if mm <= 0:
+            self.send({"type":"nack","id":i,"cmd":"set_max_travel","reason":"invalid_travel"}); return
+        self.ms.max_travel_mm[axis] = mm
+        self.send({"type":"ack","id":i,"cmd":"set_max_travel"})
 
     def _cmd_set_output(self, i, m):
         out,state = m.get("output",""), m.get("state")
@@ -748,8 +798,8 @@ class StateMachine:
             "program_loaded": ms.stored_program is not None, "fault": ms.fault,
             "current_op": ist.get("current_op"), "step_index": ist.get("step_index"),
             "loop_iter":  ist.get("loop_iter"),  "variables":  ist.get("variables"),
-            "cal_axis":  ms.cal_axis   if ms.cal_raw_steps > 0 else None,
-            "cal_steps": ms.cal_raw_steps if ms.cal_raw_steps > 0 else None,
+            "cal_axis":  ms.cal_axis   if ms.state == State.CALIBRATING else None,
+            "cal_steps": abs(ms.cal_jog_steps) if ms.state == State.CALIBRATING else None,
         }
 
 

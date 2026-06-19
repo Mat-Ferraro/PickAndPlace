@@ -39,6 +39,8 @@ void Protocol::handleLine(const char* line, uint32_t nowMs) {
   cmd.id       = doc["id"]  | -1;
   cmd.paramKey = doc["key"] | "";
   cmd.calAxis  = parseCalAxis(doc["axis"] | "X");
+  cmd.mm       = doc["mm"]  | 0.0f;   // set_cal_distance / set_max_travel magnitude
+  cmd.steps    = doc["steps"] | 0;    // cal_jog raw step count
 
   Response r = sm_.handleCommand(cmd, nowMs);
   sendResponse(r);
@@ -53,7 +55,7 @@ void Protocol::sendResponse(const Response& r) {
   out["cmd"] = r.cmd;
   if (r.kind == Response::Nack) out["reason"] = r.reason;
   if (r.hasParamValue) {
-      out["key"]   = r.cmd;   // echoed from cmd.paramKey via cmd.name path
+      out["key"]   = r.paramKey;   // the actual param key (e.g. steps_per_mm_x)
       out["value"] = r.paramValue;
   }
   if (r.hasTofOffsets) {
@@ -76,6 +78,8 @@ void Protocol::sendStatus() {
   out["laser_safe"]       = s.laserSafe;
   out["estop_hw"]         = s.estopHw;
   out["fault"]            = s.fault;   // nullptr -> JSON null automatically
+  out["cal_axis"]         = s.calAxis; // nullptr -> null unless calibrating
+  out["cal_steps"]        = s.calSteps;
   serializeJson(out, *io_);
   io_->println();
 }

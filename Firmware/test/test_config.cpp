@@ -1,5 +1,6 @@
 // Host Unity tests for Config — CRC16, load/save round-trip, version checking,
-// corruption detection, and all calibration fields including Y1/Y2 split.
+// corruption detection, and all calibration fields including Y1/Y2 split and
+// the v4 per-axis soft travel limits.
 
 #include "unity.h"
 #include "core/../config/Config.h"
@@ -41,10 +42,10 @@ void test_config_is_valid_after_updateCrc(void) {
     TEST_ASSERT_TRUE(cfg.isValid());
 }
 
-void test_version3_config_has_correct_version(void) {
+void test_version4_config_has_correct_version(void) {
     Config cfg;
     cfg.updateCrc();
-    TEST_ASSERT_EQUAL(3, cfg.version);
+    TEST_ASSERT_EQUAL(4, cfg.version);
     TEST_ASSERT_TRUE(cfg.isValid());
 }
 
@@ -91,6 +92,53 @@ void test_y1_and_y2_are_independent(void) {
     TEST_ASSERT_EQUAL_FLOAT(80.3f, b.stepsPerMmY2);
     // Confirm they can differ
     TEST_ASSERT_NOT_EQUAL(b.stepsPerMmY1, b.stepsPerMmY2);
+}
+
+// ---- soft travel limits (v4) ----
+
+void test_max_travel_defaults_to_zero(void) {
+    Config cfg;
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, cfg.maxTravelMmX);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, cfg.maxTravelMmY);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, cfg.maxTravelMmZ);
+    TEST_ASSERT_FALSE(cfg.hasTravelLimits());
+}
+
+void test_max_travel_persists(void) {
+    Config a;
+    a.maxTravelMmX = 420.0f;
+    a.maxTravelMmY = 380.0f;
+    a.maxTravelMmZ = 120.0f;
+    a.save();
+
+    Config b;
+    b.load();
+    TEST_ASSERT_EQUAL_FLOAT(420.0f, b.maxTravelMmX);
+    TEST_ASSERT_EQUAL_FLOAT(380.0f, b.maxTravelMmY);
+    TEST_ASSERT_EQUAL_FLOAT(120.0f, b.maxTravelMmZ);
+    TEST_ASSERT_TRUE(b.hasTravelLimits());
+}
+
+void test_has_travel_limits_requires_all_three(void) {
+    Config cfg;
+    cfg.maxTravelMmX = 420.0f;
+    cfg.maxTravelMmY = 380.0f;
+    // Z still zero
+    TEST_ASSERT_FALSE(cfg.hasTravelLimits());
+    cfg.maxTravelMmZ = 120.0f;
+    TEST_ASSERT_TRUE(cfg.hasTravelLimits());
+}
+
+void test_is_ready_for_motion_requires_cal_and_limits(void) {
+    Config cfg;
+    // Calibrated but no limits → not ready.
+    cfg.stepsPerMmX=80.0f; cfg.stepsPerMmY1=80.0f;
+    cfg.stepsPerMmY2=80.5f; cfg.stepsPerMmZ=32.0f;
+    TEST_ASSERT_TRUE(cfg.isCalibrated());
+    TEST_ASSERT_FALSE(cfg.isReadyForMotion());
+    // Add limits → ready.
+    cfg.maxTravelMmX=420.0f; cfg.maxTravelMmY=380.0f; cfg.maxTravelMmZ=120.0f;
+    TEST_ASSERT_TRUE(cfg.isReadyForMotion());
 }
 
 void test_servo_angles_persist(void) {
@@ -169,7 +217,7 @@ void test_all_four_axes_calibrated(void) {
 // ---- corruption / version ----
 
 void test_wrong_schema_version_fails_isValid(void) {
-    Config cfg; cfg.version = 2; cfg.updateCrc();
+    Config cfg; cfg.version = 3; cfg.updateCrc();   // an older schema version
     TEST_ASSERT_FALSE(cfg.isValid());
 }
 
@@ -184,6 +232,7 @@ void test_stepper_and_sensor_cal_persist_together(void) {
     Config a;
     a.stepsPerMmX=80.0f; a.stepsPerMmY1=80.0f;
     a.stepsPerMmY2=79.5f; a.stepsPerMmZ=32.0f;
+    a.maxTravelMmX=420.0f; a.maxTravelMmY=380.0f; a.maxTravelMmZ=120.0f;
     a.tofOffsetMm[0]=45.0f;
     a.save();
 
@@ -192,6 +241,9 @@ void test_stepper_and_sensor_cal_persist_together(void) {
     TEST_ASSERT_EQUAL_FLOAT(80.0f, b.stepsPerMmY1);
     TEST_ASSERT_EQUAL_FLOAT(79.5f, b.stepsPerMmY2);
     TEST_ASSERT_EQUAL_FLOAT(32.0f, b.stepsPerMmZ);
+    TEST_ASSERT_EQUAL_FLOAT(420.0f, b.maxTravelMmX);
+    TEST_ASSERT_EQUAL_FLOAT(380.0f, b.maxTravelMmY);
+    TEST_ASSERT_EQUAL_FLOAT(120.0f, b.maxTravelMmZ);
     TEST_ASSERT_EQUAL_FLOAT(45.0f, b.tofOffsetMm[0]);
 }
 
@@ -202,10 +254,14 @@ int main(void) {
     RUN_TEST(test_crc_is_deterministic);
     RUN_TEST(test_default_config_is_invalid);
     RUN_TEST(test_config_is_valid_after_updateCrc);
-    RUN_TEST(test_version3_config_has_correct_version);
+    RUN_TEST(test_version4_config_has_correct_version);
     RUN_TEST(test_save_then_load_round_trips_defaults);
     RUN_TEST(test_all_four_stepper_axes_persist);
     RUN_TEST(test_y1_and_y2_are_independent);
+    RUN_TEST(test_max_travel_defaults_to_zero);
+    RUN_TEST(test_max_travel_persists);
+    RUN_TEST(test_has_travel_limits_requires_all_three);
+    RUN_TEST(test_is_ready_for_motion_requires_cal_and_limits);
     RUN_TEST(test_servo_angles_persist);
     RUN_TEST(test_probe_params_persist);
     RUN_TEST(test_tof_offsets_default_to_uncalibrated);

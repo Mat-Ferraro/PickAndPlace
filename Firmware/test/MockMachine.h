@@ -11,7 +11,7 @@ class MockMachine : public IMachine {
  public:
   Position position{0,0,0};
   float    probeResult    = 0.0f;
-  uint32_t traverseSteps  = 12800;
+  OpResult jogResult      = OpResult::Ok;   // tests can force a cal-jog fault
   float    tofReadings[4] = {45.0f, 47.0f, 46.0f, 48.0f};
 
   std::map<std::string, bool> sensors;
@@ -21,7 +21,7 @@ class MockMachine : public IMachine {
   struct Move     { float x, y, z; uint8_t speed; };
   struct Probe    { float x, y, approachZ, step, maxDepth, threshold; };
   struct Output   { std::string name; bool value; };
-  struct Traverse { std::string axis; uint32_t steps; };
+  struct Jog      { std::string axis; int32_t steps; };
   struct DistRead { uint8_t channel; float result; };
 
   std::vector<Move>        moves;
@@ -31,7 +31,7 @@ class MockMachine : public IMachine {
   std::vector<uint32_t>    delays;
   std::vector<std::string> logs;
   std::vector<std::string> reads;
-  std::vector<Traverse>    traversals;
+  std::vector<Jog>         jogs;
   std::vector<DistRead>    distReads;
 
   Position getPosition() override { return position; }
@@ -53,10 +53,9 @@ class MockMachine : public IMachine {
   OpResult delayMs(uint32_t ms) override { delays.push_back(ms); return OpResult::Ok; }
   void log(const char* msg) override { logs.push_back(msg); }
 
-  OpResult traverseToStop(const char* axis, uint32_t& outSteps) override {
-    outSteps = traverseSteps;
-    traversals.push_back({axis, traverseSteps});
-    return OpResult::Ok;
+  OpResult jogAxisSteps(const char* axis, int32_t steps) override {
+    jogs.push_back({axis, steps});
+    return jogResult;
   }
   OpResult readDistanceMm(uint8_t channel, float& outMm) override {
     outMm = (channel<4) ? tofReadings[channel] : 0.0f;

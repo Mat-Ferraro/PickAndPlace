@@ -259,6 +259,75 @@ void test_move_visits_waypoints_in_order(void) {
     TEST_ASSERT_EQUAL_FLOAT(10.0f, mm->moves[2].x);
 }
 
+// ---- soft travel limits ----
+// The envelope is pushed via setTravelLimits (the StateMachine does this from
+// Config at run_program). Disabled limits leave motion unbounded.
+
+static TravelLimits limits(float x, float y, float z) {
+    TravelLimits t; t.maxX = x; t.maxY = y; t.maxZ = z; t.enabled = true;
+    return t;
+}
+
+void test_move_within_envelope_passes(void) {
+    prog("[{\"op\":\"MOVE\",\"x\":100,\"y\":200,\"z\":10}]");
+    interp->setTravelLimits(limits(300, 400, 50));
+    TEST_ASSERT_EQUAL(OpResult::Ok, interp->run());
+    TEST_ASSERT_EQUAL(1u, mm->moves.size());
+}
+
+void test_move_at_exact_limit_passes(void) {
+    prog("[{\"op\":\"MOVE\",\"x\":300,\"y\":400,\"z\":50}]");
+    interp->setTravelLimits(limits(300, 400, 50));
+    TEST_ASSERT_EQUAL(OpResult::Ok, interp->run());
+    TEST_ASSERT_EQUAL(1u, mm->moves.size());
+}
+
+void test_move_over_x_limit_faults(void) {
+    prog("[{\"op\":\"MOVE\",\"x\":350,\"y\":0,\"z\":0}]");
+    interp->setTravelLimits(limits(300, 400, 50));
+    TEST_ASSERT_EQUAL(OpResult::Faulted, interp->run());
+    TEST_ASSERT_EQUAL_STRING("soft_limit_x", interp->faultReason());
+    TEST_ASSERT_EQUAL(0u, mm->moves.size());   // never reached the machine
+}
+
+void test_move_over_y_limit_faults(void) {
+    prog("[{\"op\":\"MOVE\",\"x\":0,\"y\":500,\"z\":0}]");
+    interp->setTravelLimits(limits(300, 400, 50));
+    TEST_ASSERT_EQUAL(OpResult::Faulted, interp->run());
+    TEST_ASSERT_EQUAL_STRING("soft_limit_y", interp->faultReason());
+}
+
+void test_move_over_z_limit_faults(void) {
+    prog("[{\"op\":\"MOVE\",\"x\":0,\"y\":0,\"z\":60}]");
+    interp->setTravelLimits(limits(300, 400, 50));
+    TEST_ASSERT_EQUAL(OpResult::Faulted, interp->run());
+    TEST_ASSERT_EQUAL_STRING("soft_limit_z", interp->faultReason());
+}
+
+void test_move_negative_axis_faults(void) {
+    prog("[{\"op\":\"MOVE\",\"x\":-5,\"y\":0,\"z\":0}]");
+    interp->setTravelLimits(limits(300, 400, 50));
+    TEST_ASSERT_EQUAL(OpResult::Faulted, interp->run());
+    TEST_ASSERT_EQUAL_STRING("soft_limit_x", interp->faultReason());
+}
+
+void test_move_unbounded_when_limits_disabled(void) {
+    // No setTravelLimits call: default-disabled envelope => any target allowed.
+    prog("[{\"op\":\"MOVE\",\"x\":9999,\"y\":9999,\"z\":9999}]");
+    TEST_ASSERT_EQUAL(OpResult::Ok, interp->run());
+    TEST_ASSERT_EQUAL(1u, mm->moves.size());
+}
+
+void test_waypoint_over_limit_faults_before_final(void) {
+    // First waypoint is out of bounds: must fault there, never moving.
+    prog("[{\"op\":\"MOVE\",\"x\":10,\"y\":10,\"z\":0,"
+         "\"via\":[{\"x\":350,\"y\":10,\"z\":0}]}]");
+    interp->setTravelLimits(limits(300, 400, 50));
+    TEST_ASSERT_EQUAL(OpResult::Faulted, interp->run());
+    TEST_ASSERT_EQUAL_STRING("soft_limit_x", interp->faultReason());
+    TEST_ASSERT_EQUAL(0u, mm->moves.size());
+}
+
 void test_home_passes_axes_through(void) {
     prog("[{\"op\":\"HOME\",\"axes\":[\"X\",\"Y\",\"Z\"]}]");
     TEST_ASSERT_EQUAL(OpResult::Ok, interp->run());
@@ -616,6 +685,14 @@ int main(void) {
     RUN_TEST(test_move_speed_override);
     RUN_TEST(test_move_default_speed_is_80_without_config);
     RUN_TEST(test_move_visits_waypoints_in_order);
+    RUN_TEST(test_move_within_envelope_passes);
+    RUN_TEST(test_move_at_exact_limit_passes);
+    RUN_TEST(test_move_over_x_limit_faults);
+    RUN_TEST(test_move_over_y_limit_faults);
+    RUN_TEST(test_move_over_z_limit_faults);
+    RUN_TEST(test_move_negative_axis_faults);
+    RUN_TEST(test_move_unbounded_when_limits_disabled);
+    RUN_TEST(test_waypoint_over_limit_faults_before_final);
     RUN_TEST(test_home_passes_axes_through);
     RUN_TEST(test_probe_stores_result);
     RUN_TEST(test_probe_uses_explicit_approach_z);

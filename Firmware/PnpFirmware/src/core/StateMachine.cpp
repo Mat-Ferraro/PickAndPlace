@@ -38,6 +38,8 @@ static uint8_t allowedStates(const char* name) {
     if (PNP_STREQ(name, "calibrate_axis"))     return uint8_t(stbit(State::Idle)|stbit(State::Ready));
     if (PNP_STREQ(name, "calibrate_sensors"))  return uint8_t(stbit(State::Idle)|stbit(State::Ready));
     if (PNP_STREQ(name, "set_cal_distance"))return stbit(State::Calibrating);
+    if (PNP_STREQ(name, "cal_jog"))         return stbit(State::Calibrating);
+    if (PNP_STREQ(name, "set_max_travel"))  return uint8_t(stbit(State::Idle)|stbit(State::Ready));
     return 0;
 }
 
@@ -136,10 +138,15 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
         if (PNP_STREQ(name, "get_param")) {
             Response r = ack(cmd);
             const char* k = cmd.paramKey;
+            r.paramKey = k;
             if      (PNP_STREQ(k, "steps_per_mm_x"))  { r.paramValue = config_.stepsPerMmX;  r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "steps_per_mm_y"))  { r.paramValue = config_.stepsPerMmY1; r.hasParamValue = true; }  // legacy single-Y -> Y1
             else if (PNP_STREQ(k, "steps_per_mm_y1")) { r.paramValue = config_.stepsPerMmY1; r.hasParamValue = true; }
             else if (PNP_STREQ(k, "steps_per_mm_y2")) { r.paramValue = config_.stepsPerMmY2; r.hasParamValue = true; }
             else if (PNP_STREQ(k, "steps_per_mm_z"))  { r.paramValue = config_.stepsPerMmZ;  r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "max_travel_mm_x")) { r.paramValue = config_.maxTravelMmX; r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "max_travel_mm_y")) { r.paramValue = config_.maxTravelMmY; r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "max_travel_mm_z")) { r.paramValue = config_.maxTravelMmZ; r.hasParamValue = true; }
             else if (k[0]=='t'&&k[1]=='o'&&k[2]=='f'&&k[3]=='_'
                      &&k[4]=='o'&&k[5]=='f'&&k[6]=='f'&&k[7]=='s'
                      &&k[10]=='_'&&k[11]>='0'&&k[11]<='3') {
@@ -173,6 +180,7 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
         if (!store_.programLoaded()) return nack(cmd, "no_program");
         abortFlags_.stop = false; abortFlags_.pause = false;
         interp_.load(store_.program());
+        interp_.setTravelLimits(config_.travelLimits());   // enforce envelope this run
         state_ = State::Running;
         return ack(cmd);
     }
@@ -184,19 +192,26 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
         fault_ = nullptr; state_ = State::Idle; return ack(cmd);
     }
 
-    // Calibration commands
+    // Calibration commands (jog-and-measure)
     if (PNP_STREQ(name, "calibrate_axis")) {
         if (cmd.calAxis == CalAxis::Invalid) return nack(cmd, "invalid_axis");
-        calAxis_         = cmd.calAxis;
-        calRawSteps_     = 0;
-        calTraverseDone_ = false;
-        state_           = State::Calibrating;
+        calAxis_     = cmd.calAxis;
+        calJogSteps_ = 0;
+        state_       = State::Calibrating;
+        return ack(cmd);
+    }
+    if (PNP_STREQ(name, "cal_jog")) {
+        // Move the axis under calibration by a raw step count and accumulate.
+        OpResult r = machine_.jogAxisSteps(calAxisName(calAxis_), cmd.steps);
+        if (r != OpResult::Ok) { injectFault("cal_jog_failed"); return nack(cmd, "cal_jog_failed"); }
+        calJogSteps_ += cmd.steps;
         return ack(cmd);
     }
     if (PNP_STREQ(name, "set_cal_distance")) {
-        if (!calTraverseDone_) return nack(cmd, "traverse_not_done");
-        if (cmd.calDistMm <= 0.0f) return nack(cmd, "invalid_distance");
-        float val = (float)calRawSteps_ / cmd.calDistMm;
+        int32_t net = calJogSteps_ < 0 ? -calJogSteps_ : calJogSteps_;
+        if (net == 0)              return nack(cmd, "no_jog_steps");
+        if (cmd.mm <= 0.0f)        return nack(cmd, "invalid_distance");
+        float val = (float)net / cmd.mm;
         switch (calAxis_) {
             case CalAxis::X:  config_.stepsPerMmX  = val; break;
             case CalAxis::Y1: config_.stepsPerMmY1 = val; break;
@@ -205,7 +220,25 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
             default: break;
         }
         config_.save();
+        calJogSteps_ = 0;
+        calAxis_     = CalAxis::Invalid;
         state_ = State::Idle;
+        return ack(cmd);
+    }
+
+    if (PNP_STREQ(name, "set_max_travel")) {
+        // Travel limits are per physical AXIS, not per motor: Y1/Y2 (and legacy
+        // "Y") all set the single dual-Y envelope.
+        if (cmd.calAxis == CalAxis::Invalid) return nack(cmd, "invalid_axis");
+        if (cmd.mm <= 0.0f)                  return nack(cmd, "invalid_travel");
+        switch (cmd.calAxis) {
+            case CalAxis::X:  config_.maxTravelMmX = cmd.mm; break;
+            case CalAxis::Y1:
+            case CalAxis::Y2: config_.maxTravelMmY = cmd.mm; break;
+            case CalAxis::Z:  config_.maxTravelMmZ = cmd.mm; break;
+            default:          return nack(cmd, "invalid_axis");
+        }
+        config_.save();
         return ack(cmd);
     }
 
@@ -240,17 +273,6 @@ void StateMachine::tick(uint32_t nowMs) {
         else if (r == OpResult::Aborted) { fault_ = "estop_triggered"; state_ = State::Estopped; }
         else                             { fault_ = interp_.faultReason(); state_ = State::Faulted; }
     }
-
-    // Drive the calibration traverse (blocking, same pattern as interpreter).
-    if (state_ == State::Calibrating && !calTraverseDone_) {
-        OpResult r = machine_.traverseToStop(calAxisName(calAxis_), calRawSteps_);
-        if (r == OpResult::Ok) {
-            calTraverseDone_ = true;
-            // Stay in Calibrating — waiting for set_cal_distance from the GUI.
-        } else {
-            injectFault("cal_traverse_failed");
-        }
-    }
 }
 
 // ============================================================
@@ -281,11 +303,12 @@ void StateMachine::injectFault(const char* reason) {
 }
 
 StatusSnapshot StateMachine::buildStatus() const {
+    bool calibrating = (state_ == State::Calibrating);
     return StatusSnapshot{
         state_, store_.programLoaded(), fault_,
         true, false, false, estopHw_,
-        calTraverseDone_ ? calAxisName(calAxis_) : (const char*)nullptr,
-        calTraverseDone_ ? calRawSteps_ : 0u,
+        calibrating ? calAxisName(calAxis_) : (const char*)nullptr,
+        calSteps(),
     };
 }
 
