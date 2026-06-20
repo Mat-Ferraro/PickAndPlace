@@ -49,6 +49,19 @@ class SerialWorker(QThread):
             self.error_occurred.emit(f"Cannot open {self._url}: {exc}")
             return
 
+        # Opening a real serial port pulses DTR, which resets the Arduino into
+        # its bootloader (~1-2 s). Sending anything during that window can jam
+        # the bootloader so the sketch never starts. Wait for the handoff, then
+        # flush the bootloader's stale bytes before talking. (Skip for the
+        # socket:// simulator, which never resets.)
+        if not str(self._url).startswith("socket://"):
+            time.sleep(2.0)
+            try:
+                self._port.reset_input_buffer()
+                self._port.reset_output_buffer()
+            except Exception:
+                pass
+
         self.connection_changed.emit(True)
         buf = b""
 

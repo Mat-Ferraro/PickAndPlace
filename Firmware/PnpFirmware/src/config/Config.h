@@ -5,37 +5,36 @@
 
 // EEPROM-backed machine configuration.
 //
+// Schema v5: collapsed the dual-Y steps/mm back to a SINGLE stepsPerMmY.
+//   The two Y motors are bolted to one rigid gantry beam, so they are
+//   mechanically forced to advance identically — they cannot have different
+//   steps/mm without racking or binding the beam. steps/mm is therefore a
+//   per-AXIS property for Y, exactly like X and Z. The motors are still driven
+//   independently for ONE purpose only: homing/squaring each side to its own
+//   limit switch. After squaring they always move in lockstep, so calibration
+//   and motion use the single stepsPerMmY value. (v3 had split Y1/Y2 steps/mm;
+//   that distinction was never physically meaningful and is removed here.)
+//
 // Schema v4: added per-axis maxTravelMm (soft travel limits / work envelope).
 //   With limit-switch homing the home switch defines position 0 for each axis,
 //   so the firmware needs the axis length to bound motion: a MOVE outside
 //   [0, maxTravelMm] faults at runtime. The operator enters these via the GUI
 //   and they persist here, so the machine can home and run headless with no GUI
-//   attached. This replaces StallGuard's former role of protecting the far end
-//   of travel.
-//
-// Schema v3: stepsPerMmY split into stepsPerMmY1/stepsPerMmY2 for independent
-//   calibration of the dual-Y gantry motors (Y1 on Y socket, Y2 on E0 socket).
-//
-// Why the Y fields are asymmetric (per-motor steps/mm, single Y travel):
-//   - steps/mm is a per-MOTOR electromechanical property. Y1 and Y2 may differ
-//     slightly and can be driven independently for anti-racking, so each motor
-//     stores its own value.
-//   - maxTravel is a per-AXIS geometric property. The dual-Y gantry has one
-//     physical Y travel envelope regardless of motor count, so Y stores one.
+//   attached.
 
 namespace pnp {
 
 struct Config {
-    static constexpr uint8_t  kVersion    = 4;
+    static constexpr uint8_t  kVersion    = 5;
     static constexpr uint16_t kEepromAddr = 0;
 
     uint8_t version = kVersion;
 
-    // Stepper calibration (steps/mm), per motor. 0 = uncalibrated.
-    float stepsPerMmX  = 0.0f;
-    float stepsPerMmY1 = 0.0f;   // Y axis, motor 1 (Y socket,  D60/61/56)
-    float stepsPerMmY2 = 0.0f;   // Y axis, motor 2 (E0 socket, D26/28/24)
-    float stepsPerMmZ  = 0.0f;
+    // Stepper calibration (steps/mm), per AXIS. 0 = uncalibrated.
+    // Y is a single value shared by both gantry motors (they move in lockstep).
+    float stepsPerMmX = 0.0f;
+    float stepsPerMmY = 0.0f;   // dual-Y gantry: both motors, one value
+    float stepsPerMmZ = 0.0f;
 
     // Soft travel limits (mm), per axis. 0 = not configured.
     // Usable envelope after homing is [0, maxTravelMm*]. Operator-entered via GUI.
@@ -64,10 +63,9 @@ struct Config {
     bool load();
     void save();
 
-    // True when all four drive motors are calibrated.
+    // True when all three drive axes are calibrated.
     bool isCalibrated() const {
-        return stepsPerMmX  > 0.0f && stepsPerMmY1 > 0.0f &&
-               stepsPerMmY2 > 0.0f && stepsPerMmZ  > 0.0f;
+        return stepsPerMmX > 0.0f && stepsPerMmY > 0.0f && stepsPerMmZ > 0.0f;
     }
     // True when every axis has a soft travel limit configured.
     bool hasTravelLimits() const {

@@ -112,17 +112,19 @@ class CalibrationTab(QWidget):
         self._cal_frame = QFrame()
         self._cal_frame.setFrameShape(QFrame.Shape.StyledPanel)
         self._cal_frame.setStyleSheet(
-            "QFrame { background:#fef9e7; border:1px solid #f39c12; border-radius:4px; }")
+            "QFrame { background:#fef9e7; border:1px solid #f39c12; border-radius:4px; }"
+            " QLabel { color:#5d4037; background:transparent; }"
+            " QSpinBox, QDoubleSpinBox { color:#111; background:white; }")
         cal_v = QVBoxLayout(self._cal_frame)
         cal_v.setSpacing(6)
 
         self._cal_info_lbl = QLabel("")
         self._cal_info_lbl.setWordWrap(True)
-        self._cal_info_lbl.setStyleSheet("font-weight:bold;")
+        self._cal_info_lbl.setStyleSheet("font-weight:bold; color:#5d4037;")
         cal_v.addWidget(self._cal_info_lbl)
 
         self._jogged_lbl = QLabel("Jogged: 0 steps")
-        self._jogged_lbl.setStyleSheet("font-size:13px;")
+        self._jogged_lbl.setStyleSheet("font-size:13px; color:#5d4037;")
         cal_v.addWidget(self._jogged_lbl)
 
         # Jog controls — send raw step counts; net is accumulated firmware-side
@@ -159,6 +161,10 @@ class CalibrationTab(QWidget):
             " QPushButton:disabled { background-color:#bdc3c7; color:#888; }")
         self._btn_apply_dist.clicked.connect(self._apply_cal_distance)
         dist_row.addWidget(self._btn_apply_dist)
+        self._btn_cancel_cal = _btn("Cancel", min_width=80)
+        self._btn_cancel_cal.setToolTip("Exit calibration without changing steps/mm")
+        self._btn_cancel_cal.clicked.connect(self._cancel_cal)
+        dist_row.addWidget(self._btn_cancel_cal)
         dist_row.addStretch()
         cal_v.addLayout(dist_row)
         self._cal_frame.setVisible(False)
@@ -377,6 +383,13 @@ class CalibrationTab(QWidget):
         axis  = self._cal_axis or self._cal_axis_combo.currentText()
         self.command_requested.emit({"cmd": "cal_jog", "axis": axis, "steps": steps})
 
+    def _cancel_cal(self):
+        # Abort the in-progress calibration; firmware returns to IDLE (no save)
+        # and the panel hides on the next status broadcast.
+        self.command_requested.emit({"cmd": "cancel_calibration"})
+        self._cal_axis = ""
+        self._cal_jog_steps = 0
+
     def _apply_cal_distance(self):
         dist = self._dist_spin.value()
         axis = self._cal_axis or self._cal_axis_combo.currentText()
@@ -494,6 +507,7 @@ class CalibrationTab(QWidget):
         self._btn_jog_pos.setEnabled(calibrating and self._connected)
         self._btn_apply_dist.setEnabled(
             calibrating and self._cal_jog_steps != 0 and self._connected)
+        self._btn_cancel_cal.setEnabled(calibrating and self._connected)
         # Soft travel limits can be set in IDLE/READY
         self._travel_axis_combo.setEnabled(can_cal)
         self._travel_spin.setEnabled(can_cal)

@@ -468,14 +468,14 @@ void test_get_param_steps_per_mm_x(void) {
 }
 
 void test_get_param_steps_per_mm_y1(void) {
-    cfg->stepsPerMmY1 = 32.0f;
+    cfg->stepsPerMmY = 32.0f;
     Response r = sm->handleCommand(getParam("steps_per_mm_y1"), 0);
     TEST_ASSERT_TRUE(r.hasParamValue);
     TEST_ASSERT_EQUAL_FLOAT(32.0f, r.paramValue);
 }
 
 void test_get_param_steps_per_mm_y2(void) {
-    cfg->stepsPerMmY2 = 32.5f;
+    cfg->stepsPerMmY = 32.5f;
     Response r = sm->handleCommand(getParam("steps_per_mm_y2"), 0);
     TEST_ASSERT_TRUE(r.hasParamValue);
     TEST_ASSERT_EQUAL_FLOAT(32.5f, r.paramValue);
@@ -508,6 +508,31 @@ void test_get_param_unknown_key_has_no_value(void) {
     TEST_ASSERT_FALSE(r.hasParamValue);
 }
 
+void test_set_output_pump_reflects_in_status(void) {
+    Command c; c.name = "set_output"; c.output = "pump"; c.state = true;
+    Response r = sm->handleCommand(c, 0);
+    TEST_ASSERT_EQUAL(Response::Ack, r.kind);
+    TEST_ASSERT_TRUE(sm->buildStatus().pump);
+}
+
+void test_set_servo_door_open_reflects_in_status(void) {
+    Command c; c.name = "set_servo"; c.servo = "door"; c.position = "open";
+    sm->handleCommand(c, 0);
+    TEST_ASSERT_EQUAL_STRING("open", sm->buildStatus().servoDoor);
+}
+
+void test_set_servo_laser_press_reflects_in_status(void) {
+    Command c; c.name = "set_servo"; c.servo = "laser_btn"; c.position = "press";
+    sm->handleCommand(c, 0);
+    TEST_ASSERT_EQUAL_STRING("press", sm->buildStatus().servoLaserBtn);
+}
+
+void test_set_servo_unknown_nacks(void) {
+    Command c; c.name = "set_servo"; c.servo = "gizmo"; c.position = "open";
+    Response r = sm->handleCommand(c, 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r.kind);
+}
+
 void test_get_param_echoes_actual_key(void) {
     // Regression: the key field must be the param key, not the command name.
     cfg->stepsPerMmX = 80.0f;
@@ -516,8 +541,8 @@ void test_get_param_echoes_actual_key(void) {
     TEST_ASSERT_EQUAL_STRING("steps_per_mm_x", r.paramKey);
 }
 
-void test_get_param_legacy_steps_per_mm_y_maps_to_y1(void) {
-    cfg->stepsPerMmY1 = 33.0f;
+void test_get_param_steps_per_mm_y(void) {
+    cfg->stepsPerMmY = 33.0f;
     Response r = sm->handleCommand(getParam("steps_per_mm_y"), 0);
     TEST_ASSERT_TRUE(r.hasParamValue);
     TEST_ASSERT_EQUAL_FLOAT(33.0f, r.paramValue);
@@ -541,15 +566,26 @@ void test_get_param_max_travel_y_and_z(void) {
 }
 
 
-void test_calibrate_y2_independently(void) {
-    sm->handleCommand(calCmd("calibrate_axis", CalAxis::Y2), 0);
-    sm->handleCommand(jogCmd(CalAxis::Y2, 12750), 0);
-    sm->handleCommand(calCmd("set_cal_distance", CalAxis::Y2, 420.0f), 0);
-    // 12750 / 420 ≈ 30.357
-    float expected = 12750.0f / 420.0f;
-    TEST_ASSERT_EQUAL_FLOAT(expected, sm->stepsPerMm(CalAxis::Y2));
-    // Y1 unchanged
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, sm->stepsPerMm(CalAxis::Y1));
+void test_calibrate_y_axis_stores_single_value(void) {
+    // Calibrating Y jogs both gantry motors and stores ONE steps/mm.
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::Y), 0);
+    sm->handleCommand(jogCmd(CalAxis::Y, 12750), 0);
+    sm->handleCommand(calCmd("set_cal_distance", CalAxis::Y, 420.0f), 0);
+    float expected = 12750.0f / 420.0f;   // ≈ 30.357
+    TEST_ASSERT_EQUAL_FLOAT(expected, sm->stepsPerMm(CalAxis::Y));
+}
+
+void test_cancel_calibration_returns_to_idle_without_saving(void) {
+    sm->handleCommand(calCmd("calibrate_axis", CalAxis::X), 0);
+    sm->handleCommand(jogCmd(CalAxis::X, 5000), 0);
+    Response r = sm->handleCommand(cmd("cancel_calibration"), 0);
+    TEST_ASSERT_EQUAL(Response::Ack, r.kind);
+    TEST_ASSERT_TRUE(State::Idle == sm->state());
+    // Stored steps/mm untouched (still uncalibrated).
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, sm->stepsPerMm(CalAxis::X));
+    // A further cal_jog is now rejected (no longer Calibrating).
+    Response r2 = sm->handleCommand(jogCmd(CalAxis::X, 100), 0);
+    TEST_ASSERT_EQUAL(Response::Nack, r2.kind);
 }
 
 // ============================================================
@@ -562,12 +598,9 @@ void test_set_max_travel_writes_x(void) {
     TEST_ASSERT_EQUAL_FLOAT(300.0f, cfg->maxTravelMmX);
 }
 
-void test_set_max_travel_y1_and_y2_set_single_y_envelope(void) {
-    sm->handleCommand(calCmd("set_max_travel", CalAxis::Y1, 410.0f), 0);
+void test_set_max_travel_y_sets_envelope(void) {
+    sm->handleCommand(calCmd("set_max_travel", CalAxis::Y, 410.0f), 0);
     TEST_ASSERT_EQUAL_FLOAT(410.0f, cfg->maxTravelMmY);
-    // Y2 targets the same per-axis envelope (not a separate field).
-    sm->handleCommand(calCmd("set_max_travel", CalAxis::Y2, 420.0f), 0);
-    TEST_ASSERT_EQUAL_FLOAT(420.0f, cfg->maxTravelMmY);
 }
 
 void test_set_max_travel_rejects_invalid_axis(void) {
@@ -664,9 +697,10 @@ int main(void) {
     RUN_TEST(test_set_cal_distance_rejected_before_jog);
     RUN_TEST(test_set_cal_distance_rejected_outside_calibrating);
     RUN_TEST(test_calibrate_z_axis_independently);
-    RUN_TEST(test_calibrate_y2_independently);
+    RUN_TEST(test_calibrate_y_axis_stores_single_value);
+    RUN_TEST(test_cancel_calibration_returns_to_idle_without_saving);
     RUN_TEST(test_set_max_travel_writes_x);
-    RUN_TEST(test_set_max_travel_y1_and_y2_set_single_y_envelope);
+    RUN_TEST(test_set_max_travel_y_sets_envelope);
     RUN_TEST(test_set_max_travel_rejects_invalid_axis);
     RUN_TEST(test_set_max_travel_rejects_nonpositive);
     RUN_TEST(test_set_max_travel_persists_to_eeprom);
@@ -687,8 +721,12 @@ int main(void) {
     RUN_TEST(test_get_param_tof_offset_3);
     RUN_TEST(test_get_param_uncalibrated_returns_negative);
     RUN_TEST(test_get_param_unknown_key_has_no_value);
+    RUN_TEST(test_set_output_pump_reflects_in_status);
+    RUN_TEST(test_set_servo_door_open_reflects_in_status);
+    RUN_TEST(test_set_servo_laser_press_reflects_in_status);
+    RUN_TEST(test_set_servo_unknown_nacks);
     RUN_TEST(test_get_param_echoes_actual_key);
-    RUN_TEST(test_get_param_legacy_steps_per_mm_y_maps_to_y1);
+    RUN_TEST(test_get_param_steps_per_mm_y);
     RUN_TEST(test_get_param_max_travel_x);
     RUN_TEST(test_get_param_max_travel_y_and_z);
     return UNITY_END();

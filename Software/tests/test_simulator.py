@@ -815,6 +815,21 @@ class TestStepperCalibration:
         assert r["type"] == "nack"
         assert r["reason"] == "calibrating"
 
+    def test_cancel_calibration_returns_to_idle_without_saving(self, sm):
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        _jog(sm, 5000)
+        msgs = step(sm, {"id": 2, "cmd": "cancel_calibration"})
+        r = only(msgs)
+        assert r["type"] == "ack"
+        assert sm.ms.state == State.IDLE
+        assert sm.ms.cal_jog_steps == 0
+        assert sm.ms.steps_per_mm.get("X", 0.0) == 0.0   # untouched
+
+    def test_cancel_calibration_rejected_outside_calibrating(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "cancel_calibration"})
+        r = only(msgs)
+        assert r["type"] == "nack"
+
     # ---- state transitions ----
 
     def test_calibrate_enters_calibrating_state(self, sm):

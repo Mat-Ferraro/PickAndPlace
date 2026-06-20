@@ -10,24 +10,21 @@ namespace pnp {
 
 // Axis identifiers for calibration commands.
 // Y1 = Y socket (D60/61/56), Y2 = E0 socket (D26/28/24).
-enum class CalAxis : uint8_t { X=0, Y1=1, Y2=2, Z=3, Invalid=0xFF };
+enum class CalAxis : uint8_t { X=0, Y=1, Z=2, Invalid=0xFF };
 
-// Parse an axis string ("X","Y1","Y","Y2","Z") to CalAxis.
-// "Y" maps to Y1 for backward compatibility.
+// Parse an axis string to CalAxis. "Y", "Y1", and "Y2" all map to the single
+// Y axis — the two gantry motors share one steps/mm and calibrate together.
 inline CalAxis parseCalAxis(const char* s) {
     if (!s || !s[0]) return CalAxis::Invalid;
-    if (s[0]=='X' && !s[1])               return CalAxis::X;
-    if (s[0]=='Z' && !s[1])               return CalAxis::Z;
-    if (s[0]=='Y' && !s[1])               return CalAxis::Y1;  // legacy
-    if (s[0]=='Y' && s[1]=='1' && !s[2]) return CalAxis::Y1;
-    if (s[0]=='Y' && s[1]=='2' && !s[2]) return CalAxis::Y2;
+    if (s[0]=='X' && !s[1])  return CalAxis::X;
+    if (s[0]=='Z' && !s[1])  return CalAxis::Z;
+    if (s[0]=='Y' && (!s[1] || ((s[1]=='1'||s[1]=='2') && !s[2]))) return CalAxis::Y;
     return CalAxis::Invalid;
 }
 inline const char* calAxisName(CalAxis a) {
     switch (a) {
         case CalAxis::X:  return "X";
-        case CalAxis::Y1: return "Y1";
-        case CalAxis::Y2: return "Y2";
+        case CalAxis::Y:  return "Y";   // HAL jogs BOTH Y motors in lockstep
         case CalAxis::Z:  return "Z";
         default:          return "?";
     }
@@ -50,6 +47,12 @@ struct Command {
   CalAxis     calAxis    = CalAxis::X;
   float       mm         = 0.0f;   // magnitude arg (cal distance or travel limit)
   int32_t     steps      = 0;      // cal_jog raw step count (signed = direction)
+
+  // set_output / set_servo
+  const char* output   = "";       // set_output: output name ("pump", ...)
+  bool        state    = false;    // set_output: on/off
+  const char* servo    = "";       // set_servo: servo name ("door", "laser_btn")
+  const char* position = "";       // set_servo: "open"/"closed"/"press"/"release"
 };
 
 struct Response {
@@ -85,6 +88,14 @@ struct StatusSnapshot {
   // Calibration fields
   const char* calAxis;         // axis name being calibrated (nullptr = none)
   uint32_t    calSteps;        // net steps jogged so far (0 = none yet)
+  // Output state (reflected to the GUI Service tab)
+  bool        pump;            // pump on/off
+  bool        valve;           // valve (solenoid) on/off
+  const char* servoDoor;       // "open" / "closed"
+  const char* servoLaserBtn;   // "press" / "release"
+  // Physical input state (Service-tab Inputs panel)
+  bool        startBtn;        // Start button currently pressed
+  bool        pauseBtn;        // Pause button currently pressed
 };
 
 class StateMachine {
@@ -96,6 +107,7 @@ class StateMachine {
   void           tick(uint32_t nowMs);
   void           pressButton(const char* button, uint32_t nowMs);
   void           setEstopHardware(bool active);
+  void           setButtonLevels(bool start, bool pause) { startBtn_ = start; pauseBtn_ = pause; }
   void           injectFault(const char* reason);
   StatusSnapshot buildStatus() const;
 
@@ -133,6 +145,14 @@ class StateMachine {
   CalAxis  calAxis_      = CalAxis::Invalid;
   int32_t  calJogSteps_  = 0;     // net steps jogged this session (signed)
   char     xferErr_[80] = {};
+
+  // Output state (mirrored to the GUI Service tab via status)
+  bool        pump_          = false;
+  bool        valve_         = false;
+  const char* servoDoor_     = "closed";
+  const char* servoLaserBtn_ = "release";
+  bool        startBtn_      = false;   // live (debounced) button levels
+  bool        pauseBtn_      = false;
 };
 
 }  // namespace pnp

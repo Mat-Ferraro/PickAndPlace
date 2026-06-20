@@ -73,6 +73,7 @@ COMMAND_STATES: Dict[str, set] = {
     "calibrate_axis":     {State.IDLE, State.READY},
     "cal_jog":            {State.CALIBRATING},
     "set_cal_distance":   {State.CALIBRATING},
+    "cancel_calibration": {State.CALIBRATING},
     "set_max_travel":     {State.IDLE, State.READY},
     "calibrate_sensors":  {State.IDLE, State.READY},
 }
@@ -734,6 +735,13 @@ class StateMachine:
         self.ms.cal_axis = ""
         self.ms.set_state(State.IDLE)
         self.send({"type":"ack","id":i,"cmd":"set_cal_distance"})
+
+    def _cmd_cancel_calibration(self, i, m):
+        # Abandon calibration: discard jog accumulation, leave steps/mm intact.
+        self.ms.cal_jog_steps = 0
+        self.ms.cal_axis = ""
+        self.ms.set_state(State.IDLE)
+        self.send({"type":"ack","id":i,"cmd":"cancel_calibration"})
 
     def _cmd_set_max_travel(self, i, m):
         axis = str(m.get("axis", "")).upper()

@@ -1,5 +1,6 @@
 from gui_common import *
 from gui_common import _btn, _group, _label, _style_btn
+from PyQt6.QtCore import QTimer
 
 
 class StatusLight(QLabel):
@@ -78,7 +79,8 @@ class ServiceTab(QWidget):
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             val_lbl.setMinimumWidth(70)
             val_lbl.setStyleSheet(
-                "border:1px solid #bdc3c7; border-radius:3px; padding:2px; background:white;")
+                "border:1px solid #bdc3c7; border-radius:3px; padding:2px;"
+                " background:white; color:#111;")
             self._tgt_labels[axis] = val_lbl
             btn_dec = _btn("−", min_width=32)
             btn_inc = _btn("+", min_width=32)
@@ -205,10 +207,14 @@ class ServiceTab(QWidget):
         self._btn_valve_off = _btn("OFF", min_width=80)
         out_grid.addWidget(self._btn_valve_on,  1, 1)
         out_grid.addWidget(self._btn_valve_off, 1, 2)
+        out_grid.addWidget(_label("Beeper:"), 2, 0)
+        self._btn_beep = _btn("Beep", min_width=80)
+        out_grid.addWidget(self._btn_beep, 2, 1)
         self._btn_pump_on.clicked.connect(lambda: self._send_output("pump", True))
         self._btn_pump_off.clicked.connect(lambda: self._send_output("pump", False))
         self._btn_valve_on.clicked.connect(lambda: self._send_output("valve", True))
         self._btn_valve_off.clicked.connect(lambda: self._send_output("valve", False))
+        self._btn_beep.clicked.connect(self._beep)
         right.addWidget(_group("Output Test", out_grid))
         right.addStretch()
 
@@ -225,14 +231,17 @@ class ServiceTab(QWidget):
         self._lbl_y.setText(f"{self._cur_y:.2f}")
         self._lbl_z.setText(f"{self._cur_z:.2f}")
         self._lbl_name.setText(msg.get("position_name") or "—")
-        self._update_controls()
-
-    def on_sensors(self, msg: dict):
+        # Inputs (button dots) and outputs (button highlights) ride in status.
         inputs = msg.get("inputs", {})
         for key, (light, t_col, f_col) in self._input_lights.items():
             light.set_bool(inputs.get(key, False), t_col, f_col)
         self._current_outputs = msg.get("outputs", {})
         self._apply_output_states(self._current_outputs)
+        self._update_controls()
+
+    def on_sensors(self, msg: dict):
+        # ToF detail is shown on the Comms tab; nothing to do here.
+        pass
 
     def on_positions(self, msg: dict):
         for name, coords in msg.get("positions", {}).items():
@@ -309,6 +318,12 @@ class ServiceTab(QWidget):
         self._apply_output_states(self._current_outputs)
         self.command_requested.emit({"cmd": "set_output", "output": output, "state": state})
 
+    def _beep(self):
+        # Momentary: on now, off after 300 ms.
+        self.command_requested.emit({"cmd": "set_output", "output": "beeper", "state": True})
+        QTimer.singleShot(300, lambda: self.command_requested.emit(
+            {"cmd": "set_output", "output": "beeper", "state": False}))
+
     def _update_controls(self):
         can_act = self._connected and self._state == "READY"
         can_io  = self._connected and self._state in ("IDLE", "READY")
@@ -322,6 +337,7 @@ class ServiceTab(QWidget):
             self._btn_laser_press, self._btn_laser_release,
             self._btn_pump_on, self._btn_pump_off,
             self._btn_valve_on, self._btn_valve_off,
+            self._btn_beep,
         ]:
             btn.setEnabled(can_io)
 
@@ -383,9 +399,15 @@ class CommsTab(QWidget):
         self._log.setReadOnly(True)
         self._log.setFont(QFont("Courier New", 9))
         log_v = QVBoxLayout()
+        log_btns = QHBoxLayout()
         clear_btn = _btn("Clear", min_width=60)
         clear_btn.clicked.connect(self._log.clear)
-        log_v.addWidget(clear_btn)
+        export_btn = _btn("Export…", min_width=70)
+        export_btn.clicked.connect(self._export)
+        log_btns.addWidget(clear_btn)
+        log_btns.addWidget(export_btn)
+        log_btns.addStretch(1)
+        log_v.addLayout(log_btns)
         log_v.addWidget(self._log)
         root.addWidget(_group("Communications Log", log_v), 1)
 
@@ -413,3 +435,16 @@ class CommsTab(QWidget):
 
     def set_connected(self, connected: bool):
         pass
+
+    def _export(self):
+        default = f"pnp_comms_{time.strftime('%Y%m%d_%H%M%S')}.log"
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "Export Communications Log", default,
+            "Log files (*.log *.txt);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._log.toPlainText())
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Failed", str(exc))

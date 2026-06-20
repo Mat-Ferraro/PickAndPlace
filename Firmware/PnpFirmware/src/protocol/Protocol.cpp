@@ -41,6 +41,10 @@ void Protocol::handleLine(const char* line, uint32_t nowMs) {
   cmd.calAxis  = parseCalAxis(doc["axis"] | "X");
   cmd.mm       = doc["mm"]  | 0.0f;   // set_cal_distance / set_max_travel magnitude
   cmd.steps    = doc["steps"] | 0;    // cal_jog raw step count
+  cmd.output   = doc["output"]   | "";    // set_output name
+  cmd.state    = doc["state"]    | false; // set_output on/off
+  cmd.servo    = doc["servo"]    | "";    // set_servo name
+  cmd.position = doc["position"] | "";    // set_servo position
 
   Response r = sm_.handleCommand(cmd, nowMs);
   sendResponse(r);
@@ -80,6 +84,13 @@ void Protocol::sendStatus() {
   out["fault"]            = s.fault;   // nullptr -> JSON null automatically
   out["cal_axis"]         = s.calAxis; // nullptr -> null unless calibrating
   out["cal_steps"]        = s.calSteps;
+  out["outputs"]["pump"]            = s.pump;
+  out["outputs"]["valve"]           = s.valve;
+  out["outputs"]["servo_door"]      = s.servoDoor;
+  out["outputs"]["servo_laser_btn"] = s.servoLaserBtn;
+  out["inputs"]["estop_hw"]  = s.estopHw;
+  out["inputs"]["start_btn"] = s.startBtn;
+  out["inputs"]["pause_btn"] = s.pauseBtn;
   serializeJson(out, *io_);
   io_->println();
 }

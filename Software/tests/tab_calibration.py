@@ -112,17 +112,19 @@ class CalibrationTab(QWidget):
         self._cal_frame = QFrame()
         self._cal_frame.setFrameShape(QFrame.Shape.StyledPanel)
         self._cal_frame.setStyleSheet(
-            "QFrame { background:#fef9e7; border:1px solid #f39c12; border-radius:4px; }")
+            "QFrame { background:#fef9e7; border:1px solid #f39c12; border-radius:4px; }"
+            " QLabel { color:#5d4037; background:transparent; }"
+            " QSpinBox, QDoubleSpinBox { color:#111; background:white; }")
         cal_v = QVBoxLayout(self._cal_frame)
         cal_v.setSpacing(6)
 
         self._cal_info_lbl = QLabel("")
         self._cal_info_lbl.setWordWrap(True)
-        self._cal_info_lbl.setStyleSheet("font-weight:bold;")
+        self._cal_info_lbl.setStyleSheet("font-weight:bold; color:#5d4037;")
         cal_v.addWidget(self._cal_info_lbl)
 
         self._jogged_lbl = QLabel("Jogged: 0 steps")
-        self._jogged_lbl.setStyleSheet("font-size:13px;")
+        self._jogged_lbl.setStyleSheet("font-size:13px; color:#5d4037;")
         cal_v.addWidget(self._jogged_lbl)
 
         # Jog controls — send raw step counts; net is accumulated firmware-side

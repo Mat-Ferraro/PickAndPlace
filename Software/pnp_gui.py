@@ -24,7 +24,13 @@ class MainWindow(QMainWindow):
         self._last_state: str    = ""
         self._sensor_timer = QTimer(self)
         self._sensor_timer.timeout.connect(self._poll_sensors)
+        # Paced query queue — connect-time queries are sent one at a time so a
+        # burst can't overrun the MCU's 64-byte serial RX buffer.
+        self._query_queue: list = []
+        self._query_timer = QTimer(self)
+        self._query_timer.timeout.connect(self._drain_query_queue)
         self._build_ui()
+        self._refresh_ports()
 
     def _build_ui(self):
         central = QWidget()
@@ -36,9 +42,15 @@ class MainWindow(QMainWindow):
         # Connection bar
         conn = QHBoxLayout()
         conn.addWidget(QLabel("Port / URL:"))
-        self._url_edit = QLineEdit("socket://localhost:9999/")
-        self._url_edit.setMinimumWidth(240)
-        conn.addWidget(self._url_edit)
+        self._url_combo = QComboBox()
+        self._url_combo.setEditable(True)
+        self._url_combo.setMinimumWidth(240)
+        conn.addWidget(self._url_combo)
+        self._btn_refresh_ports = QPushButton("⟳")
+        self._btn_refresh_ports.setFixedWidth(32)
+        self._btn_refresh_ports.setToolTip("Rescan serial ports")
+        self._btn_refresh_ports.clicked.connect(self._refresh_ports)
+        conn.addWidget(self._btn_refresh_ports)
         self._conn_btn = QPushButton("Connect")
         self._conn_btn.setFixedWidth(90)
         self._conn_btn.clicked.connect(self._toggle_connection)
@@ -90,7 +102,7 @@ class MainWindow(QMainWindow):
             self._worker.disconnect()
             self._conn_btn.setText("Connect")
         else:
-            url = self._url_edit.text().strip()
+            url = self._url_combo.currentText().strip()
             if not url:
                 return
             self._worker = SerialWorker()
@@ -102,27 +114,68 @@ class MainWindow(QMainWindow):
             self._worker.connect_to(url)
             self._conn_btn.setText("Disconnect")
 
+    def _refresh_ports(self):
+        """Rescan available serial ports and repopulate the dropdown."""
+        current = self._url_combo.currentText().strip()
+        try:
+            from serial.tools import list_ports
+            ports = [p.device for p in list_ports.comports()]
+        except Exception:
+            ports = []
+        self._url_combo.blockSignals(True)
+        self._url_combo.clear()
+        for dev in ports:                       # real serial ports first
+            self._url_combo.addItem(dev)
+        self._url_combo.addItem("socket://localhost:9999/")   # simulator
+        if current:
+            self._url_combo.setCurrentText(current)           # keep user choice
+        elif ports:
+            self._url_combo.setCurrentText(ports[0])
+        self._url_combo.blockSignals(False)
+
+    def _queue_queries(self, queries: list):
+        """Append queries to the paced send queue (one every 40 ms) so a burst
+        can't overrun the MCU's serial RX buffer."""
+        self._query_queue.extend(queries)
+        if not self._query_timer.isActive():
+            self._query_timer.start(40)
+
+    def _drain_query_queue(self):
+        if not self._query_queue:
+            self._query_timer.stop()
+            return
+        self._send(self._query_queue.pop(0))
+
     def _on_connection_changed(self, connected: bool):
         self._set_connected(connected)
         if connected:
-            url = self._url_edit.text().strip()
+            url = self._url_combo.currentText().strip()
             self._event_log.append("SYSTEM", f"Connected to {url}")
-            self._send({"cmd": "query_status"})
-            self._send({"cmd": "query_positions"})
-            self._send({"cmd": "query_sensors"})
-            # Fetch persisted calibration values
-            for axis_key in ("steps_per_mm_x", "steps_per_mm_y", "steps_per_mm_z"):
-                self._send({"cmd": "get_param", "key": axis_key})
-            for axis_key in ("max_travel_mm_x", "max_travel_mm_y", "max_travel_mm_z"):
-                self._send({"cmd": "get_param", "key": axis_key})
-            for ch in range(4):
-                self._send({"cmd": "get_param", "key": f"tof_offset_{ch}"})
+            # Pace these — sending all at once overruns the MCU RX buffer and
+            # the later queries (the calibration ones) get silently dropped.
+            queries = [
+                {"cmd": "query_status"},
+                {"cmd": "query_positions"},
+                {"cmd": "query_sensors"},
+                {"cmd": "get_param", "key": "steps_per_mm_x"},
+                {"cmd": "get_param", "key": "steps_per_mm_y"},
+                {"cmd": "get_param", "key": "steps_per_mm_z"},
+                {"cmd": "get_param", "key": "max_travel_mm_x"},
+                {"cmd": "get_param", "key": "max_travel_mm_y"},
+                {"cmd": "get_param", "key": "max_travel_mm_z"},
+            ]
+            queries += [{"cmd": "get_param", "key": f"tof_offset_{ch}"} for ch in range(4)]
+            self._queue_queries(queries)
             self._sensor_timer.start(2000)   # poll sensors every 2 s
         else:
+            self._query_queue.clear()
+            self._query_timer.stop()
             self._event_log.append("SYSTEM", "Disconnected")
 
     def _on_error(self, msg: str):
         self._sensor_timer.stop()
+        self._query_timer.stop()
+        self._query_queue.clear()
         self._status_bar.showMessage(f"Error: {msg}")
         self._set_connected(False)
         self._conn_btn.setText("Connect")
@@ -204,6 +257,7 @@ class MainWindow(QMainWindow):
         if msg_type == "status":
             self._run_tab.on_status(msg)
             self._cal_tab.on_status(msg)
+            self._svc_tab.on_status(msg)
             state = msg.get("state", "")
             if state != self._last_state:
                 fault = msg.get("fault")
@@ -281,12 +335,12 @@ class MainWindow(QMainWindow):
                 pass   # state updates via status broadcast
             elif cmd == "set_cal_distance":
                 # Refresh calibration values after a successful set
-                for axis_key in ("steps_per_mm_x", "steps_per_mm_y", "steps_per_mm_z"):
-                    self._send({"cmd": "get_param", "key": axis_key})
+                self._queue_queries([{"cmd": "get_param", "key": k} for k in
+                    ("steps_per_mm_x", "steps_per_mm_y", "steps_per_mm_z")])
             elif cmd == "set_max_travel":
                 # Refresh travel limits after a successful set
-                for axis_key in ("max_travel_mm_x", "max_travel_mm_y", "max_travel_mm_z"):
-                    self._send({"cmd": "get_param", "key": axis_key})
+                self._queue_queries([{"cmd": "get_param", "key": k} for k in
+                    ("max_travel_mm_x", "max_travel_mm_y", "max_travel_mm_z")])
             elif cmd == "cal_jog":
                 pass   # accumulator surfaced via status (cal_steps)
             elif cmd in ("reset_fault", "reset_estop"):

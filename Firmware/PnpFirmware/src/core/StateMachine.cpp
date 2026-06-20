@@ -39,6 +39,7 @@ static uint8_t allowedStates(const char* name) {
     if (PNP_STREQ(name, "calibrate_sensors"))  return uint8_t(stbit(State::Idle)|stbit(State::Ready));
     if (PNP_STREQ(name, "set_cal_distance"))return stbit(State::Calibrating);
     if (PNP_STREQ(name, "cal_jog"))         return stbit(State::Calibrating);
+    if (PNP_STREQ(name, "cancel_calibration")) return stbit(State::Calibrating);
     if (PNP_STREQ(name, "set_max_travel"))  return uint8_t(stbit(State::Idle)|stbit(State::Ready));
     return 0;
 }
@@ -59,8 +60,7 @@ static bool isAlwaysAccept(const char* name) {
 float StateMachine::stepsPerMm(CalAxis axis) const {
     switch (axis) {
         case CalAxis::X:  return config_.stepsPerMmX;
-        case CalAxis::Y1: return config_.stepsPerMmY1;
-        case CalAxis::Y2: return config_.stepsPerMmY2;
+        case CalAxis::Y:  return config_.stepsPerMmY;
         case CalAxis::Z:  return config_.stepsPerMmZ;
         default:          return 0.0f;
     }
@@ -139,11 +139,11 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
             Response r = ack(cmd);
             const char* k = cmd.paramKey;
             r.paramKey = k;
-            if      (PNP_STREQ(k, "steps_per_mm_x"))  { r.paramValue = config_.stepsPerMmX;  r.hasParamValue = true; }
-            else if (PNP_STREQ(k, "steps_per_mm_y"))  { r.paramValue = config_.stepsPerMmY1; r.hasParamValue = true; }  // legacy single-Y -> Y1
-            else if (PNP_STREQ(k, "steps_per_mm_y1")) { r.paramValue = config_.stepsPerMmY1; r.hasParamValue = true; }
-            else if (PNP_STREQ(k, "steps_per_mm_y2")) { r.paramValue = config_.stepsPerMmY2; r.hasParamValue = true; }
-            else if (PNP_STREQ(k, "steps_per_mm_z"))  { r.paramValue = config_.stepsPerMmZ;  r.hasParamValue = true; }
+            if      (PNP_STREQ(k, "steps_per_mm_x"))  { r.paramValue = config_.stepsPerMmX; r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "steps_per_mm_y")  ||
+                     PNP_STREQ(k, "steps_per_mm_y1") ||
+                     PNP_STREQ(k, "steps_per_mm_y2")) { r.paramValue = config_.stepsPerMmY; r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "steps_per_mm_z"))  { r.paramValue = config_.stepsPerMmZ; r.hasParamValue = true; }
             else if (PNP_STREQ(k, "max_travel_mm_x")) { r.paramValue = config_.maxTravelMmX; r.hasParamValue = true; }
             else if (PNP_STREQ(k, "max_travel_mm_y")) { r.paramValue = config_.maxTravelMmY; r.hasParamValue = true; }
             else if (PNP_STREQ(k, "max_travel_mm_z")) { r.paramValue = config_.maxTravelMmZ; r.hasParamValue = true; }
@@ -207,16 +207,23 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
         calJogSteps_ += cmd.steps;
         return ack(cmd);
     }
+    if (PNP_STREQ(name, "cancel_calibration")) {
+        // Abandon the in-progress calibration: discard accumulated jog, leave
+        // the stored steps/mm untouched, return to Idle. No config write.
+        calJogSteps_ = 0;
+        calAxis_     = CalAxis::Invalid;
+        state_       = State::Idle;
+        return ack(cmd);
+    }
     if (PNP_STREQ(name, "set_cal_distance")) {
         int32_t net = calJogSteps_ < 0 ? -calJogSteps_ : calJogSteps_;
         if (net == 0)              return nack(cmd, "no_jog_steps");
         if (cmd.mm <= 0.0f)        return nack(cmd, "invalid_distance");
         float val = (float)net / cmd.mm;
         switch (calAxis_) {
-            case CalAxis::X:  config_.stepsPerMmX  = val; break;
-            case CalAxis::Y1: config_.stepsPerMmY1 = val; break;
-            case CalAxis::Y2: config_.stepsPerMmY2 = val; break;
-            case CalAxis::Z:  config_.stepsPerMmZ  = val; break;
+            case CalAxis::X:  config_.stepsPerMmX = val; break;
+            case CalAxis::Y:  config_.stepsPerMmY = val; break;
+            case CalAxis::Z:  config_.stepsPerMmZ = val; break;
             default: break;
         }
         config_.save();
@@ -227,14 +234,12 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
     }
 
     if (PNP_STREQ(name, "set_max_travel")) {
-        // Travel limits are per physical AXIS, not per motor: Y1/Y2 (and legacy
-        // "Y") all set the single dual-Y envelope.
+        // Travel limits are per physical AXIS. Y is the single dual-Y envelope.
         if (cmd.calAxis == CalAxis::Invalid) return nack(cmd, "invalid_axis");
         if (cmd.mm <= 0.0f)                  return nack(cmd, "invalid_travel");
         switch (cmd.calAxis) {
             case CalAxis::X:  config_.maxTravelMmX = cmd.mm; break;
-            case CalAxis::Y1:
-            case CalAxis::Y2: config_.maxTravelMmY = cmd.mm; break;
+            case CalAxis::Y:  config_.maxTravelMmY = cmd.mm; break;
             case CalAxis::Z:  config_.maxTravelMmZ = cmd.mm; break;
             default:          return nack(cmd, "invalid_axis");
         }
@@ -253,6 +258,29 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
         }
         config_.save();
         return r;
+    }
+
+    if (PNP_STREQ(name, "set_output")) {
+        machine_.setOutput(cmd.output, cmd.state);
+        if      (PNP_STREQ(cmd.output, "pump"))  pump_  = cmd.state;
+        else if (PNP_STREQ(cmd.output, "valve")) valve_ = cmd.state;
+        return ack(cmd);
+    }
+
+    if (PNP_STREQ(name, "set_servo")) {
+        // 2-position servos: open/press -> true, closed/release -> false.
+        const bool on = PNP_STREQ(cmd.position, "open") ||
+                        PNP_STREQ(cmd.position, "press");
+        if (PNP_STREQ(cmd.servo, "door")) {
+            machine_.setOutput("servo_door", on);
+            servoDoor_ = on ? "open" : "closed";
+        } else if (PNP_STREQ(cmd.servo, "laser_btn")) {
+            machine_.setOutput("servo_laser_btn", on);
+            servoLaserBtn_ = on ? "press" : "release";
+        } else {
+            return nack(cmd, "unknown_servo");
+        }
+        return ack(cmd);
     }
 
     return ack(cmd);  // gated but not yet implemented
@@ -309,6 +337,8 @@ StatusSnapshot StateMachine::buildStatus() const {
         true, false, false, estopHw_,
         calibrating ? calAxisName(calAxis_) : (const char*)nullptr,
         calSteps(),
+        pump_, valve_, servoDoor_, servoLaserBtn_,
+        startBtn_, pauseBtn_,
     };
 }
 
