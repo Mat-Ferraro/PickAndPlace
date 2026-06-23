@@ -66,6 +66,15 @@ void Protocol::sendResponse(const Response& r) {
       JsonArray arr = out["offsets"].to<JsonArray>();
       for (int i = 0; i < 4; i++) arr.add(r.tofOffsets[i]);
   }
+  if (r.hasTofReadings) {
+      JsonArray arr = out["tof"].to<JsonArray>();
+      for (int c = 0; c < 6; c++) {
+          JsonObject e = arr.add<JsonObject>();
+          e["ch"]      = c;
+          e["dist_mm"] = r.tofDistMm[c];
+          e["valid"]   = r.tofValid[c];
+      }
+  }
   serializeJson(out, *io_);
   io_->println();
 }

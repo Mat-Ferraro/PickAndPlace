@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 #include <Servo.h>
+#include <Wire.h>
+#include <VL53L4CD.h>   // Pololu vl53l4cd-arduino library
 #include "IMachine.h"
 
 namespace pnp {
@@ -94,6 +96,24 @@ class Machine : public IMachine {
     laserServo_.attach(kServoLaserBtnPin);
     doorServo_.write(kDoorClosedDeg);
     laserServo_.write(kLaserReleaseDeg);
+
+    // ToF: VL53L4CD sensors behind a TCA9548A mux (all at 0x29; the mux routes
+    // one channel at a time). Sensors are init'd lazily on first read of each
+    // channel, so this works with 1 sensor (only its channel comes up) or all 6
+    // without knowing the wiring here.
+    Wire.begin();
+    tof_.setBus(&Wire);
+    tof_.setTimeout(100);
+    if (kUseMux) {
+      pinMode(kMuxRstPin, OUTPUT);
+      resetMux();                 // pulse RST low->high for a clean mux state
+    } else {
+      // Single sensor wired straight to the bus (no mux): init it now on ch0.
+      if (tof_.init()) {
+        tof_.setRangeTiming(50, 0);   // 50 ms budget, continuous
+        tof_.startContinuous();
+      }
+    }
   }
 
   // ---- Outputs (REAL) ----------------------------------------------------
@@ -171,9 +191,31 @@ class Machine : public IMachine {
     return OpResult::Ok;
   }
 
-  // ---- ToF (STUB) --------------------------------------------------------
-  OpResult readDistanceMm(uint8_t, float& outMm) override {
+  // ---- ToF -------------------------------------------------------------
+  // Returns mm in outMm, or -1.0 if invalid / no sensor on that channel.
+  // With the mux, selects the channel then reads; each channel's sensor is
+  // init'd on first use (so unused channels just report invalid).
+  OpResult readDistanceMm(uint8_t channel, float& outMm) override {
     outMm = -1.0f;
+    if (channel >= kTofChannels) return OpResult::Ok;
+    if (!kUseMux && channel != 0) return OpResult::Ok;  // single direct sensor = ch0
+
+    if (kUseMux) selectMuxChannel(channel);
+
+    if (!tofInited_[channel]) {
+      if (tof_.init()) {                 // a sensor answered on this channel
+        tof_.setTimeout(100);
+        tof_.setRangeTiming(50, 0);      // 50 ms budget, continuous
+        tof_.startContinuous();
+        tofInited_[channel] = true;
+      } else {
+        return OpResult::Ok;             // nothing here -> invalid
+      }
+    }
+    uint16_t mm = tof_.read(false);      // non-blocking: latest reading
+    if (!tof_.timeoutOccurred() && tof_.ranging_data.range_status == 0) {
+      outMm = (float)mm;
+    }
     return OpResult::Ok;
   }
 
@@ -229,8 +271,30 @@ class Machine : public IMachine {
     return digitalRead(kEstopPin) == HIGH;   // NC+pullup: HIGH = pressed/open
   }
 
+  // ToF / mux. kUseMux is now TRUE: every readDistanceMm(ch) routes the mux to
+  // channel ch before reading. RST (active-low) is on a Mega GPIO so firmware
+  // can hard-reset the mux for bus recovery.
+  static const bool    kUseMux      = true;
+  static const uint8_t kMuxAddr     = 0x70;   // TCA9548A (A0/A1/A2 -> GND)
+  static const uint8_t kMuxRstPin   = 17;     // D17 -> mux RST (active-low)
+  static const uint8_t kTofChannels = 6;      // ch0-3 pickup, ch4 home, ch5 material
+  static void selectMuxChannel(uint8_t ch) {
+    Wire.beginTransmission(kMuxAddr);
+    Wire.write((uint8_t)(1u << ch));
+    Wire.endTransmission();
+  }
+  void resetMux() {
+    digitalWrite(kMuxRstPin, LOW);
+    delayMicroseconds(10);
+    digitalWrite(kMuxRstPin, HIGH);
+    delay(2);
+    for (uint8_t c = 0; c < kTofChannels; c++) tofInited_[c] = false;
+  }
+
   Servo    doorServo_;
   Servo    laserServo_;
+  VL53L4CD tof_;
+  bool     tofInited_[6] = {false, false, false, false, false, false};
   Position pos_{0, 0, 0};
 };
 

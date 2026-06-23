@@ -260,6 +260,20 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
         return r;
     }
 
+    if (PNP_STREQ(name, "query_sensors")) {
+        // Live ToF read of all mux channels for the GUI readout. Channels with
+        // no sensor (or an invalid range) report valid=false.
+        Response r = ack(cmd);
+        r.hasTofReadings = true;
+        for (uint8_t ch = 0; ch < 6; ch++) {
+            float mm = -1.0f;
+            machine_.readDistanceMm(ch, mm);
+            r.tofDistMm[ch] = mm;
+            r.tofValid[ch]  = (mm >= 0.0f);
+        }
+        return r;
+    }
+
     if (PNP_STREQ(name, "set_output")) {
         machine_.setOutput(cmd.output, cmd.state);
         if      (PNP_STREQ(cmd.output, "pump"))  pump_  = cmd.state;

@@ -137,6 +137,22 @@ class ServiceTab(QWidget):
             in_grid.addWidget(light,         0, col * 2, Qt.AlignmentFlag.AlignCenter)
             in_grid.addWidget(QLabel(label), 0, col * 2 + 1)
         left.addWidget(_group("Inputs", in_grid))
+
+        # ---- Live ToF readout ----
+        self._tof_rows = QTableWidget(6, 3)
+        self._tof_rows.setHorizontalHeaderLabels(["Sensor", "Distance", "Status"])
+        self._tof_rows.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self._tof_rows.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._tof_rows.verticalHeader().setVisible(False)
+        self._tof_rows.setMaximumHeight(196)
+        for row in range(6):
+            self._tof_rows.setItem(row, 0, QTableWidgetItem(TOF_PURPOSES[row]))
+            self._tof_rows.setItem(row, 1, QTableWidgetItem("—"))
+            self._tof_rows.setItem(row, 2, QTableWidgetItem("—"))
+        tof_box = QVBoxLayout()
+        tof_box.addWidget(self._tof_rows)
+        left.addWidget(_group("ToF Sensors (live)", tof_box))
         left.addStretch()
 
         # ---- Named positions ----
@@ -240,8 +256,21 @@ class ServiceTab(QWidget):
         self._update_controls()
 
     def on_sensors(self, msg: dict):
-        # ToF detail is shown on the Comms tab; nothing to do here.
-        pass
+        # Live ToF distances from query_sensors: [{ch, dist_mm, valid}, ...].
+        for entry in msg.get("tof", []):
+            ch = entry.get("ch")
+            if ch is None or not (0 <= ch < 6):
+                continue
+            valid = bool(entry.get("valid", False))
+            dist  = entry.get("dist_mm")
+            if valid and dist is not None:
+                self._tof_rows.item(ch, 1).setText(f"{float(dist):.0f} mm")
+                self._tof_rows.item(ch, 2).setText("OK")
+                self._tof_rows.item(ch, 2).setForeground(QColor("#27ae60"))
+            else:
+                self._tof_rows.item(ch, 1).setText("—")
+                self._tof_rows.item(ch, 2).setText("no reading")
+                self._tof_rows.item(ch, 2).setForeground(QColor("#e67e22"))
 
     def on_positions(self, msg: dict):
         for name, coords in msg.get("positions", {}).items():

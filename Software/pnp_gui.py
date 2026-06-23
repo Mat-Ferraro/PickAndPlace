@@ -166,7 +166,7 @@ class MainWindow(QMainWindow):
             ]
             queries += [{"cmd": "get_param", "key": f"tof_offset_{ch}"} for ch in range(4)]
             self._queue_queries(queries)
-            self._sensor_timer.start(2000)   # poll sensors every 2 s
+            self._sensor_timer.start(1000)   # poll sensors every 1 s (live ToF readout)
         else:
             self._query_queue.clear()
             self._query_timer.stop()
@@ -287,6 +287,7 @@ class MainWindow(QMainWindow):
             if cmd == "query_sensors":
                 self._cal_tab.on_sensors(msg)
                 self._comms_tab.on_sensors(msg)
+                self._svc_tab.on_sensors(msg)
             elif cmd == "query_positions":
                 self._svc_tab.on_positions(msg)
             elif cmd in ("teach_position", "save_position"):

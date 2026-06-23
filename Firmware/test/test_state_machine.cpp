@@ -588,6 +588,17 @@ void test_cancel_calibration_returns_to_idle_without_saving(void) {
     TEST_ASSERT_EQUAL(Response::Nack, r2.kind);
 }
 
+void test_query_sensors_returns_six_tof_readings(void) {
+    Response r = sm->handleCommand(cmd("query_sensors"), 0);
+    TEST_ASSERT_EQUAL(Response::Ack, r.kind);
+    TEST_ASSERT_TRUE(r.hasTofReadings);
+    // MockMachine reports channels 0-3 = {45,47,46,48} mm; the read flows through.
+    TEST_ASSERT_EQUAL_FLOAT(45.0f, r.tofDistMm[0]);
+    TEST_ASSERT_EQUAL_FLOAT(48.0f, r.tofDistMm[3]);
+    TEST_ASSERT_TRUE(r.tofValid[0]);
+    TEST_ASSERT_TRUE(r.tofValid[3]);
+}
+
 // ============================================================
 // set_max_travel + soft-limit enforcement
 // ============================================================
@@ -699,6 +710,7 @@ int main(void) {
     RUN_TEST(test_calibrate_z_axis_independently);
     RUN_TEST(test_calibrate_y_axis_stores_single_value);
     RUN_TEST(test_cancel_calibration_returns_to_idle_without_saving);
+    RUN_TEST(test_query_sensors_returns_six_tof_readings);
     RUN_TEST(test_set_max_travel_writes_x);
     RUN_TEST(test_set_max_travel_y_sets_envelope);
     RUN_TEST(test_set_max_travel_rejects_invalid_axis);

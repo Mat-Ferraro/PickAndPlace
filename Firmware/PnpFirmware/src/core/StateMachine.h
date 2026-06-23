@@ -71,6 +71,10 @@ struct Response {
   // calibrate_sensors response payload
   bool        hasTofOffsets = false;
   float       tofOffsets[4] = {0,0,0,0};
+  // query_sensors response payload (live ToF distances, 6 mux channels)
+  bool        hasTofReadings = false;
+  float       tofDistMm[6]   = {0,0,0,0,0,0};
+  bool        tofValid[6]    = {false,false,false,false,false,false};
 
   Response() : kind(None), id(-1), cmd(""), reason("") {}
   Response(Kind k, int32_t i, const char* c, const char* r)
