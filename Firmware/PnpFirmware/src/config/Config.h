@@ -5,6 +5,9 @@
 
 // EEPROM-backed machine configuration.
 //
+// Schema v6: added persisted ToF confidence gates (tofMaxSigmaMm,
+// tofMinSignalKcps) so GUI-tuned values survive power cycles and apply at boot.
+//
 // Schema v5: collapsed the dual-Y steps/mm back to a SINGLE stepsPerMmY.
 //   The two Y motors are bolted to one rigid gantry beam, so they are
 //   mechanically forced to advance identically — they cannot have different
@@ -25,7 +28,7 @@
 namespace pnp {
 
 struct Config {
-    static constexpr uint8_t  kVersion    = 5;
+    static constexpr uint8_t  kVersion    = 6;
     static constexpr uint16_t kEepromAddr = 0;
 
     uint8_t version = kVersion;
@@ -56,6 +59,13 @@ struct Config {
     float probeStepMm     =   0.5f;
     float probeMaxDepthMm = 200.0f;
     float probeThreshMm   =  40.0f;
+
+    // ToF confidence gates (live-tunable from the GUI; persisted here so tuned
+    // values survive power cycles and are applied at boot — needed for headless).
+    // sigma = max measurement uncertainty in mm; signal = min return strength in
+    // kcps (0 disables that gate).
+    uint16_t tofMaxSigmaMm    = 15;
+    uint16_t tofMinSignalKcps = 0;
 
     // CRC must be last.
     uint16_t crc = 0;

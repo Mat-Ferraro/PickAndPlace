@@ -60,6 +60,7 @@ class CalibrationTab(QWidget):
         v.addWidget(self._build_stepper_group())
         v.addWidget(self._build_sensor_arm_group())
         v.addWidget(self._build_sensor_cal_group())
+        v.addWidget(self._build_tof_confidence_group())
         v.addWidget(self._build_sensor_status_group())
         v.addStretch()
 
@@ -252,6 +253,58 @@ class CalibrationTab(QWidget):
         v.addWidget(self._arm_table)
         v.addLayout(thresh_row)
         return _group("Arm Sensors — Pickup Detection (ch0–ch3)", v)
+
+    def _build_tof_confidence_group(self) -> QWidget:
+        v = QVBoxLayout()
+        v.setSpacing(8)
+        v.addWidget(QLabel(
+            "Reject low-confidence ToF readings (kills open-space ping-pong).\n"
+            "Sigma = max measurement uncertainty in mm (lower = stricter).\n"
+            "Signal = min return strength in kcps (0 = off; raise to reject weak)."))
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Max sigma (mm):"))
+        self._sigma_spin = QSpinBox()
+        self._sigma_spin.setRange(1, 200)
+        self._sigma_spin.setValue(15)
+        self._sigma_spin.setFixedWidth(70)
+        self._sigma_spin.setStyleSheet("color:#111; background:white;")
+        row.addWidget(self._sigma_spin)
+
+        row.addSpacing(16)
+        row.addWidget(QLabel("Min signal (kcps):"))
+        self._signal_spin = QSpinBox()
+        self._signal_spin.setRange(0, 10000)
+        self._signal_spin.setSingleStep(50)
+        self._signal_spin.setValue(0)
+        self._signal_spin.setFixedWidth(90)
+        self._signal_spin.setStyleSheet("color:#111; background:white;")
+        row.addWidget(self._signal_spin)
+
+        self._btn_apply_tof = _btn("Apply", min_width=90)
+        self._btn_apply_tof.setToolTip("Send thresholds to the machine (live, no reflash)")
+        self._btn_apply_tof.clicked.connect(self._apply_tof_thresholds)
+        row.addWidget(self._btn_apply_tof)
+        row.addStretch()
+
+        v.addLayout(row)
+        return _group("ToF Confidence (live tuning)", v)
+
+    def set_tof_threshold_value(self, key: str, value: float):
+        spin = self._sigma_spin if key == "tof_max_sigma_mm" else \
+               self._signal_spin if key == "tof_min_signal_kcps" else None
+        if spin is not None:
+            spin.blockSignals(True)
+            spin.setValue(int(round(value)))
+            spin.blockSignals(False)
+
+    def _apply_tof_thresholds(self):
+        self.command_requested.emit({"cmd": "set_tof_threshold",
+                                     "key": "tof_max_sigma_mm",
+                                     "mm": int(self._sigma_spin.value())})
+        self.command_requested.emit({"cmd": "set_tof_threshold",
+                                     "key": "tof_min_signal_kcps",
+                                     "mm": int(self._signal_spin.value())})
 
     def _build_sensor_cal_group(self) -> QWidget:
         v = QVBoxLayout()

@@ -116,6 +116,12 @@ class Machine : public IMachine {
     }
   }
 
+  // Live-tunable ToF confidence gates (called from the GUI via set_tof_threshold).
+  void setTofThresholds(uint16_t maxSigmaMm, uint16_t minSignalKcps) override {
+    tofMaxSigmaMm_    = maxSigmaMm;
+    tofMinSignalKcps_ = minSignalKcps;
+  }
+
   // ---- Outputs (REAL) ----------------------------------------------------
   void setOutput(const char* name, bool value) override {
     if (strcmp(name, "pump") == 0) {
@@ -212,9 +218,18 @@ class Machine : public IMachine {
         return OpResult::Ok;             // nothing here -> invalid
       }
     }
-    uint16_t mm = tof_.read(false);      // non-blocking: latest reading
-    if (!tof_.timeoutOccurred() && tof_.ranging_data.range_status == 0) {
-      outMm = (float)mm;
+    tof_.read(false);                    // non-blocking: refresh ranging_data
+    const auto& rd = tof_.ranging_data;
+    // Accept only confident readings. The library's default sigma threshold is a
+    // loose 90 mm, so weak/multipath returns (e.g. rotating toward open space)
+    // arrive flagged "valid" with garbage distance. Reject them here so the
+    // readout cleanly shows "no reading" instead of ping-ponging.
+    if (!tof_.timeoutOccurred()
+        && rd.range_status == 0
+        && rd.range_mm > 0
+        && rd.sigma_mm <= tofMaxSigmaMm_
+        && rd.signal_rate_kcps >= tofMinSignalKcps_) {
+      outMm = (float)rd.range_mm;
     }
     return OpResult::Ok;
   }
@@ -278,6 +293,11 @@ class Machine : public IMachine {
   static const uint8_t kMuxAddr     = 0x70;   // TCA9548A (A0/A1/A2 -> GND)
   static const uint8_t kMuxRstPin   = 17;     // D17 -> mux RST (active-low)
   static const uint8_t kTofChannels = 6;      // ch0-3 pickup, ch4 home, ch5 material
+  // ToF confidence gates (live-tunable from the GUI; see setTofThresholds).
+  // sigma is measurement uncertainty in mm (lower = stricter); signal is return
+  // strength in kcps (0 disables that gate).
+  static const uint16_t kDefaultMaxSigmaMm    = 15;
+  static const uint16_t kDefaultMinSignalKcps = 0;
   static void selectMuxChannel(uint8_t ch) {
     Wire.beginTransmission(kMuxAddr);
     Wire.write((uint8_t)(1u << ch));
@@ -295,6 +315,8 @@ class Machine : public IMachine {
   Servo    laserServo_;
   VL53L4CD tof_;
   bool     tofInited_[6] = {false, false, false, false, false, false};
+  uint16_t tofMaxSigmaMm_    = kDefaultMaxSigmaMm;
+  uint16_t tofMinSignalKcps_ = kDefaultMinSignalKcps;
   Position pos_{0, 0, 0};
 };
 

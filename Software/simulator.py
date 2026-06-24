@@ -23,6 +23,7 @@ import queue
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
@@ -76,6 +77,7 @@ COMMAND_STATES: Dict[str, set] = {
     "cancel_calibration": {State.CALIBRATING},
     "set_max_travel":     {State.IDLE, State.READY},
     "calibrate_sensors":  {State.IDLE, State.READY},
+    "set_tof_threshold":  {State.IDLE, State.READY},
 }
 
 ALWAYS_ACCEPT = {
@@ -142,6 +144,8 @@ class MachineState:
     # Per-axis soft travel limits (mm); 0 = not configured.
     max_travel_mm: dict  = field(default_factory=lambda: {"X":0.0,"Y":0.0,"Z":0.0})
     tof_offsets:   list  = field(default_factory=lambda: [None, None, None, None])
+    tof_max_sigma_mm:    int = 15
+    tof_min_signal_kcps: int = 0
     params: Dict[str, Any] = field(default_factory=lambda: {
         "laser_interlock_mode":        0,
         "status_rate_hz":              5,
@@ -332,6 +336,7 @@ class StateMachine:
         self._pause_event = threading.Event()
         self._stop_event  = threading.Event()
         self._homing_done_at: Optional[float] = None
+        self._recent_ids: deque = deque(maxlen=16)   # command de-dup (mirror MCU)
 
     # ---- External API -----------------------------------------------------
 
@@ -474,6 +479,13 @@ class StateMachine:
             self.send({"type":"nack","id":None,"cmd":cmd,"reason":"missing_id"}); return
         if cmd is None:
             self.send({"type":"nack","id":cmd_id,"cmd":None,"reason":"malformed"}); return
+        # Exempt from de-dup: queries (their reply carries data, must re-run) and
+        # the chunked-upload verbs (which reuse one id by design, never retried).
+        dedup_exempt = (cmd.startswith("query")
+                        or cmd in ("get_param", "get_program",
+                                   "begin_transfer", "program_chunk", "end_transfer"))
+        if not dedup_exempt and cmd_id in self._recent_ids:
+            self.send({"type":"ack","id":cmd_id,"cmd":cmd}); return
         if cmd not in ALWAYS_ACCEPT and cmd not in COMMAND_STATES:
             self.send({"type":"nack","id":cmd_id,"cmd":cmd,"reason":"unknown_cmd"}); return
         if cmd not in ALWAYS_ACCEPT:
@@ -482,6 +494,8 @@ class StateMachine:
                           "hw_fault"      if ms.state == State.FAULTED    else
                           "calibrating"   if ms.state == State.CALIBRATING else "not_ready")
                 self.send({"type":"nack","id":cmd_id,"cmd":cmd,"reason":reason}); return
+        if not dedup_exempt:
+            self._recent_ids.append(cmd_id)
         handler = getattr(self, f"_cmd_{cmd}", None)
         if handler:
             handler(cmd_id, msg)
@@ -627,6 +641,10 @@ class StateMachine:
                 self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":val}); return
             except (IndexError, ValueError):
                 pass
+        # ToF confidence thresholds
+        if k in ("tof_max_sigma_mm", "tof_min_signal_kcps"):
+            self.send({"type":"ack","id":i,"cmd":"get_param","key":k,
+                       "value":getattr(self.ms, k)}); return
         if k not in self.ms.params:
             self.send({"type":"nack","id":i,"cmd":"get_param","reason":"invalid_param"}); return
         self.send({"type":"ack","id":i,"cmd":"get_param","key":k,"value":self.ms.params[k]})
@@ -755,6 +773,19 @@ class StateMachine:
         self.ms.max_travel_mm[axis] = mm
         self.send({"type":"ack","id":i,"cmd":"set_max_travel"})
 
+    def _cmd_set_tof_threshold(self, i, m):
+        k = str(m.get("key", ""))
+        v = float(m.get("mm", -1))
+        if v < 0:
+            self.send({"type":"nack","id":i,"cmd":"set_tof_threshold","reason":"invalid_value"}); return
+        if k == "tof_max_sigma_mm":
+            self.ms.tof_max_sigma_mm = int(v)
+        elif k == "tof_min_signal_kcps":
+            self.ms.tof_min_signal_kcps = int(v)
+        else:
+            self.send({"type":"nack","id":i,"cmd":"set_tof_threshold","reason":"unknown_key"}); return
+        self.send({"type":"ack","id":i,"cmd":"set_tof_threshold"})
+
     def _cmd_set_output(self, i, m):
         out,state = m.get("output",""), m.get("state")
         if out not in VALID_OUTPUTS or not isinstance(state, bool):
@@ -808,6 +839,9 @@ class StateMachine:
             "loop_iter":  ist.get("loop_iter"),  "variables":  ist.get("variables"),
             "cal_axis":  ms.cal_axis   if ms.state == State.CALIBRATING else None,
             "cal_steps": abs(ms.cal_jog_steps) if ms.state == State.CALIBRATING else None,
+            # ToF rides in status now (push), matching the firmware — no poll.
+            "tof": [{"ch": c, "dist_mm": ms.tof_dist_mm[c], "valid": ms.tof_valid[c]}
+                    for c in range(6)],
         }
 
 

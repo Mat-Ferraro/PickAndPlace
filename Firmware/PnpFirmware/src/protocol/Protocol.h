@@ -21,16 +21,20 @@ class Protocol {
 
  private:
   void handleLine(const char* line, uint32_t nowMs);
+  void sendStatus(bool withTof = true);
   void sendResponse(const Response& r);
-  void sendStatus();
 
   StateMachine& sm_;
   Stream*       io_ = nullptr;
   char          buf_[256];
   uint16_t      len_ = 0;
   uint32_t      lastStatusMs_ = 0;
+  uint32_t      statusCount_  = 0;
 
   static constexpr uint32_t kStatusPeriodMs = 250;
+  // ToF rides in the status broadcast. To cut outbound traffic, include it only
+  // every Nth status: 1 = every status (4 Hz), 2 = every other (2 Hz), etc.
+  static constexpr uint8_t  kStatusTofEvery = 1;
 };
 
 }  // namespace pnp

@@ -17,6 +17,13 @@ class SerialWorker(QThread):
     error_occurred     = pyqtSignal(str)
     raw_tx             = pyqtSignal(str)
     raw_rx             = pyqtSignal(str)
+    command_failed     = pyqtSignal(dict)   # command dropped after all retries
+
+    # Confirmed-delivery: a sent command is held until its ack/nack returns; if
+    # none arrives within RETRY_TIMEOUT it is resent, up to MAX_ATTEMPTS. The MCU
+    # de-dups by id, so a resend of a command that did land won't run twice.
+    RETRY_TIMEOUT_S = 0.30
+    MAX_ATTEMPTS    = 5
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -25,6 +32,7 @@ class SerialWorker(QThread):
         self._send_queue: queue.Queue = queue.Queue()
         self._running    = False
         self._next_id    = 1
+        self._pending: dict = {}   # id -> {"msg", "sent", "attempts"} (worker thread only)
 
     def connect_to(self, url: str):
         self._url     = url
@@ -64,6 +72,7 @@ class SerialWorker(QThread):
 
         self.connection_changed.emit(True)
         buf = b""
+        self._pending.clear()
 
         while self._running:
             while not self._send_queue.empty():
@@ -82,6 +91,11 @@ class SerialWorker(QThread):
                     line = json.dumps(msg, separators=(",", ":")) + "\n"
                     self._port.write(line.encode())
                     self.raw_tx.emit(line.rstrip())
+                    # Hold for confirmed delivery (queries included — their reply
+                    # is the confirmation). load_program took the chunked path above.
+                    if msg.get("id") is not None:
+                        self._pending[msg["id"]] = {
+                            "msg": msg, "sent": time.monotonic(), "attempts": 1}
                 except Exception as exc:
                     self.error_occurred.emit(f"Send error: {exc}")
                     self._running = False
@@ -103,15 +117,46 @@ class SerialWorker(QThread):
                     continue
                 try:
                     msg = json.loads(line)
+                    # Confirmed delivery: any reply carrying our id clears it.
+                    if msg.get("type") in ("ack", "nack") and msg.get("id") is not None:
+                        self._pending.pop(msg["id"], None)
                     self.raw_rx.emit(line.decode())
                     self.message_received.emit(msg)
                 except Exception:
                     pass
 
+            self._retry_pending()
+
+        self._pending.clear()
         self._port.close()
         self._port    = None
         self._running = False
         self.connection_changed.emit(False)
+
+    def _retry_pending(self):
+        """Resend commands whose ack/nack hasn't returned in time; give up after
+        MAX_ATTEMPTS. The MCU de-dups by id, so resends are safe."""
+        if not self._pending or not self._port:
+            return
+        now = time.monotonic()
+        for cmd_id in list(self._pending.keys()):
+            entry = self._pending.get(cmd_id)
+            if entry is None or now - entry["sent"] < self.RETRY_TIMEOUT_S:
+                continue
+            if entry["attempts"] >= self.MAX_ATTEMPTS:
+                self._pending.pop(cmd_id, None)
+                self.command_failed.emit(entry["msg"])
+                continue
+            try:
+                line = json.dumps(entry["msg"], separators=(",", ":")) + "\n"
+                self._port.write(line.encode())
+                self.raw_tx.emit(line.rstrip() + "  (retry)")
+                entry["sent"]      = now
+                entry["attempts"] += 1
+            except Exception as exc:
+                self.error_occurred.emit(f"Retry error: {exc}")
+                self._running = False
+                return
 
     # -----------------------------------------------------------------------
     # Chunked transfer (runs synchronously inside the worker thread)

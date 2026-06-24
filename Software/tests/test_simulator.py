@@ -12,6 +12,7 @@ Run from the Software/ directory:  pytest -q
 """
 
 import base64
+import itertools
 import json
 import queue
 import threading
@@ -770,9 +771,15 @@ class TestSimulatedMachine:
 # Stepper calibration
 # ===========================================================================
 
+_jog_ids = itertools.count(900)
+
 def _jog(sm, steps):
-    """Jog-and-measure: send a cal_jog command to accumulate raw steps."""
-    return step(sm, {"id": 99, "cmd": "cal_jog", "steps": steps})
+    """Jog-and-measure: send a cal_jog command to accumulate raw steps.
+
+    Uses a unique id per call (as the real GUI does); the MCU/sim de-dup retried
+    commands by id, so reusing one id would make the second jog look like a retry.
+    """
+    return step(sm, {"id": next(_jog_ids), "cmd": "cal_jog", "steps": steps})
 
 
 class TestStepperCalibration:
@@ -854,6 +861,24 @@ class TestStepperCalibration:
         _jog(sm, -2000)
         assert sm.ms.cal_jog_steps == 4400   # net of out-and-back
 
+    def test_duplicate_command_id_is_not_re_executed(self, sm):
+        # A retried command (same id) must re-ack but not run twice.
+        step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": "X"})
+        step(sm, {"id": 7, "cmd": "cal_jog", "steps": 1000})
+        assert sm.ms.cal_jog_steps == 1000
+        msgs = step(sm, {"id": 7, "cmd": "cal_jog", "steps": 1000})  # resend
+        assert only(msgs)["type"] == "ack"          # still acked
+        assert sm.ms.cal_jog_steps == 1000          # not doubled
+
+    def test_query_with_repeated_id_still_runs(self, sm):
+        # Queries are exempt from de-dup — they must re-run for fresh data even
+        # when an id repeats (would otherwise look like a retry).
+        sm.ms.set_state(State.READY)
+        m1 = step(sm, {"id": 5, "cmd": "query_status"})
+        m2 = step(sm, {"id": 5, "cmd": "query_status"})
+        assert any(x.get("type") == "status" for x in m1)
+        assert any(x.get("type") == "status" for x in m2)   # not deduped
+
     def test_cal_jog_rejected_outside_calibrating(self, sm):
         sm.ms.set_state(State.READY)
         msgs = step(sm, {"id": 1, "cmd": "cal_jog", "steps": 1000})
@@ -893,13 +918,13 @@ class TestStepperCalibration:
         assert r["reason"] == "invalid_distance"
 
     def test_axes_calibrated_independently(self, sm):
-        for axis in ("X", "Y", "Z"):
+        for i, axis in enumerate(("X", "Y", "Z")):
             sm.ms.set_state(State.IDLE)
             sm.ms.cal_axis = ""
             sm.ms.cal_jog_steps = 0
-            step(sm, {"id": 1, "cmd": "calibrate_axis", "axis": axis})
+            step(sm, {"id": 100 + i*2,   "cmd": "calibrate_axis", "axis": axis})
             _jog(sm, 10000)
-            step(sm, {"id": 2, "cmd": "set_cal_distance", "axis": axis, "mm": 100.0})
+            step(sm, {"id": 101 + i*2, "cmd": "set_cal_distance", "axis": axis, "mm": 100.0})
         for axis in ("X", "Y", "Z"):
             assert sm.ms.steps_per_mm[axis] > 0
 
@@ -965,6 +990,22 @@ class TestSoftTravelLimits:
         r = only(msgs)
         assert r["type"] == "nack"
         assert r["reason"] == "not_ready"
+
+    def test_set_tof_threshold_writes_and_reads_back(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "set_tof_threshold",
+                         "key": "tof_max_sigma_mm", "mm": 10})
+        assert only(msgs)["type"] == "ack"
+        assert sm.ms.tof_max_sigma_mm == 10
+        msgs = step(sm, {"id": 2, "cmd": "get_param", "key": "tof_max_sigma_mm"})
+        assert only(msgs)["value"] == 10
+
+    def test_set_tof_threshold_unknown_key_nacks(self, sm):
+        msgs = step(sm, {"id": 1, "cmd": "set_tof_threshold",
+                         "key": "bogus", "mm": 5})
+        r = only(msgs)
+        assert r["type"] == "nack"
+        assert r["reason"] == "unknown_key"
+
 
     def test_set_max_travel_rejects_bad_axis(self, sm):
         msgs = step(sm, {"id": 1, "cmd": "set_max_travel", "axis": "Q", "mm": 250.0})

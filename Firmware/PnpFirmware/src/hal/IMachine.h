@@ -18,6 +18,8 @@ class IMachine {
   virtual bool     readSensor(const char* name) = 0;
   virtual OpResult delayMs(uint32_t ms) = 0;
   virtual void     log(const char* msg) = 0;
+  // Optional: live ToF confidence gates. Default no-op so stubs need not care.
+  virtual void     setTofThresholds(uint16_t /*maxSigmaMm*/, uint16_t /*minSignalKcps*/) {}
 
   // Jog one motor by a raw, uncalibrated step count (signed: + / - chooses
   // direction). Used by jog-and-measure calibration — it deliberately bypasses

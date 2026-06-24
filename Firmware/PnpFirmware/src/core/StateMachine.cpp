@@ -41,6 +41,7 @@ static uint8_t allowedStates(const char* name) {
     if (PNP_STREQ(name, "cal_jog"))         return stbit(State::Calibrating);
     if (PNP_STREQ(name, "cancel_calibration")) return stbit(State::Calibrating);
     if (PNP_STREQ(name, "set_max_travel"))  return uint8_t(stbit(State::Idle)|stbit(State::Ready));
+    if (PNP_STREQ(name, "set_tof_threshold")) return uint8_t(stbit(State::Idle)|stbit(State::Ready));
     return 0;
 }
 
@@ -144,6 +145,8 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
                      PNP_STREQ(k, "steps_per_mm_y1") ||
                      PNP_STREQ(k, "steps_per_mm_y2")) { r.paramValue = config_.stepsPerMmY; r.hasParamValue = true; }
             else if (PNP_STREQ(k, "steps_per_mm_z"))  { r.paramValue = config_.stepsPerMmZ; r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "tof_max_sigma_mm"))    { r.paramValue = (float)config_.tofMaxSigmaMm;    r.hasParamValue = true; }
+            else if (PNP_STREQ(k, "tof_min_signal_kcps")) { r.paramValue = (float)config_.tofMinSignalKcps; r.hasParamValue = true; }
             else if (PNP_STREQ(k, "max_travel_mm_x")) { r.paramValue = config_.maxTravelMmX; r.hasParamValue = true; }
             else if (PNP_STREQ(k, "max_travel_mm_y")) { r.paramValue = config_.maxTravelMmY; r.hasParamValue = true; }
             else if (PNP_STREQ(k, "max_travel_mm_z")) { r.paramValue = config_.maxTravelMmZ; r.hasParamValue = true; }
@@ -244,6 +247,20 @@ Response StateMachine::handleCommand(const Command& cmd, uint32_t nowMs) {
             default:          return nack(cmd, "invalid_axis");
         }
         config_.save();
+        return ack(cmd);
+    }
+
+    if (PNP_STREQ(name, "set_tof_threshold")) {
+        // Live ToF confidence tuning, persisted to EEPROM so it survives reboots
+        // and is re-applied at boot (headless).
+        const char* k = cmd.paramKey;
+        if (cmd.mm < 0.0f) return nack(cmd, "invalid_value");
+        uint16_t v = (uint16_t)cmd.mm;
+        if      (PNP_STREQ(k, "tof_max_sigma_mm"))    config_.tofMaxSigmaMm    = v;
+        else if (PNP_STREQ(k, "tof_min_signal_kcps")) config_.tofMinSignalKcps = v;
+        else return nack(cmd, "unknown_key");
+        config_.save();
+        machine_.setTofThresholds(config_.tofMaxSigmaMm, config_.tofMinSignalKcps);
         return ack(cmd);
     }
 
@@ -354,6 +371,27 @@ StatusSnapshot StateMachine::buildStatus() const {
         pump_, valve_, servoDoor_, servoLaserBtn_,
         startBtn_, pauseBtn_,
     };
+}
+
+void StateMachine::readTof(float dist[6], bool valid[6]) {
+    for (uint8_t ch = 0; ch < 6; ch++) {
+        float mm = -1.0f;
+        machine_.readDistanceMm(ch, mm);
+        dist[ch]  = mm;
+        valid[ch] = (mm >= 0.0f);
+    }
+}
+
+bool StateMachine::isDuplicateCommand(int32_t id) const {
+    if (id <= 0) return false;
+    for (uint8_t i = 0; i < 16; i++) if (recentIds_[i] == id) return true;
+    return false;
+}
+
+void StateMachine::rememberCommand(int32_t id) {
+    if (id <= 0) return;
+    recentIds_[recentHead_] = id;
+    recentHead_ = (uint8_t)((recentHead_ + 1) % 16);
 }
 
 }  // namespace pnp

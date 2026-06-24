@@ -599,6 +599,38 @@ void test_query_sensors_returns_six_tof_readings(void) {
     TEST_ASSERT_TRUE(r.tofValid[3]);
 }
 
+void test_command_dedup_ring(void) {
+    TEST_ASSERT_FALSE(sm->isDuplicateCommand(42));
+    sm->rememberCommand(42);
+    TEST_ASSERT_TRUE(sm->isDuplicateCommand(42));
+    sm->rememberCommand(-5);                    // ids <= 0 are ignored
+    TEST_ASSERT_FALSE(sm->isDuplicateCommand(0));
+    TEST_ASSERT_FALSE(sm->isDuplicateCommand(-5));
+}
+
+void test_read_tof_populates_all_channels(void) {
+    float dist[6]; bool valid[6];
+    sm->readTof(dist, valid);
+    TEST_ASSERT_EQUAL_FLOAT(45.0f, dist[0]);
+    TEST_ASSERT_EQUAL_FLOAT(48.0f, dist[3]);
+    TEST_ASSERT_TRUE(valid[0]);
+    TEST_ASSERT_TRUE(valid[3]);
+}
+
+void test_set_tof_threshold_updates_and_reads_back(void) {
+    Command c; c.name = "set_tof_threshold"; c.id = 1;
+    c.paramKey = "tof_max_sigma_mm"; c.mm = 10.0f;
+    TEST_ASSERT_EQUAL(Response::Ack, sm->handleCommand(c, 0).kind);
+
+    Response g = sm->handleCommand(getParam("tof_max_sigma_mm"), 0);
+    TEST_ASSERT_TRUE(g.hasParamValue);
+    TEST_ASSERT_EQUAL_FLOAT(10.0f, g.paramValue);
+
+    Command bad; bad.name = "set_tof_threshold"; bad.id = 2;
+    bad.paramKey = "bogus"; bad.mm = 5.0f;
+    TEST_ASSERT_EQUAL(Response::Nack, sm->handleCommand(bad, 0).kind);
+}
+
 // ============================================================
 // set_max_travel + soft-limit enforcement
 // ============================================================
@@ -711,6 +743,9 @@ int main(void) {
     RUN_TEST(test_calibrate_y_axis_stores_single_value);
     RUN_TEST(test_cancel_calibration_returns_to_idle_without_saving);
     RUN_TEST(test_query_sensors_returns_six_tof_readings);
+    RUN_TEST(test_read_tof_populates_all_channels);
+    RUN_TEST(test_command_dedup_ring);
+    RUN_TEST(test_set_tof_threshold_updates_and_reads_back);
     RUN_TEST(test_set_max_travel_writes_x);
     RUN_TEST(test_set_max_travel_y_sets_envelope);
     RUN_TEST(test_set_max_travel_rejects_invalid_axis);

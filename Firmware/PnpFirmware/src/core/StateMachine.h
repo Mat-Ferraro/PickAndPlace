@@ -114,6 +114,15 @@ class StateMachine {
   void           setButtonLevels(bool start, bool pause) { startBtn_ = start; pauseBtn_ = pause; }
   void           injectFault(const char* reason);
   StatusSnapshot buildStatus() const;
+  // Reads all 6 ToF mux channels (non-const: does I2C). Folded into the status
+  // broadcast so the GUI gets live distances without a separate poll command.
+  void readTof(float dist[6], bool valid[6]);
+
+  // Command de-dup for at-least-once delivery: the host retries a command whose
+  // ack was lost, so the transport re-acks an already-seen id WITHOUT re-running
+  // it (re-running a relative cal_jog, say, would be wrong).
+  bool isDuplicateCommand(int32_t id) const;
+  void rememberCommand(int32_t id);
 
   State       state()         const { return state_; }
   bool        programLoaded() const { return store_.programLoaded(); }
@@ -144,6 +153,10 @@ class StateMachine {
   const char* fault_          = nullptr;
   bool        estopHw_        = false;
   uint32_t    homingDeadline_ = 0;
+
+  // Recently-acked command ids, for de-dup of retried commands.
+  int32_t  recentIds_[16] = {};
+  uint8_t  recentHead_    = 0;
 
   // Calibration state (jog-and-measure)
   CalAxis  calAxis_      = CalAxis::Invalid;

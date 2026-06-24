@@ -29,6 +29,10 @@ class MainWindow(QMainWindow):
         self._query_queue: list = []
         self._query_timer = QTimer(self)
         self._query_timer.timeout.connect(self._drain_query_queue)
+        # Initial get_param burst is deferred until the MCU is booted (see
+        # _on_connection_changed): the Mega auto-resets on serial open and would
+        # drop queries sent during its ~2 s bootloader.
+        self._pending_initial_queries: list | None = None
         self._build_ui()
         self._refresh_ports()
 
@@ -102,36 +106,74 @@ class MainWindow(QMainWindow):
             self._worker.disconnect()
             self._conn_btn.setText("Connect")
         else:
-            url = self._url_combo.currentText().strip()
+            url = self._selected_url()
             if not url:
                 return
             self._worker = SerialWorker()
             self._worker.message_received.connect(self._on_message)
             self._worker.connection_changed.connect(self._on_connection_changed)
             self._worker.error_occurred.connect(self._on_error)
+            self._worker.command_failed.connect(self._on_command_failed)
             self._worker.raw_tx.connect(self._comms_tab.log_tx)
             self._worker.raw_rx.connect(self._comms_tab.log_rx)
             self._worker.connect_to(url)
             self._conn_btn.setText("Disconnect")
 
     def _refresh_ports(self):
-        """Rescan available serial ports and repopulate the dropdown."""
-        current = self._url_combo.currentText().strip()
+        """Rescan serial ports and repopulate the dropdown with friendly labels.
+        Each item shows e.g. 'COM7 — Arduino Mega 2560' but carries the bare
+        device ('COM7') as its data — that's what we actually connect to."""
+        import re
+        prev = self._selected_url()
         try:
             from serial.tools import list_ports
-            ports = [p.device for p in list_ports.comports()]
+            ports = list(list_ports.comports())
         except Exception:
             ports = []
         self._url_combo.blockSignals(True)
         self._url_combo.clear()
-        for dev in ports:                       # real serial ports first
-            self._url_combo.addItem(dev)
-        self._url_combo.addItem("socket://localhost:9999/")   # simulator
-        if current:
-            self._url_combo.setCurrentText(current)           # keep user choice
-        elif ports:
-            self._url_combo.setCurrentText(ports[0])
+        arduino_idx = -1
+        for i, p in enumerate(ports):
+            desc = re.sub(r"\s*\(COM\d+\)\s*$", "", (p.description or "")).strip()
+            label = f"{p.device} — {desc}" if desc and desc.lower() != "n/a" else p.device
+            self._url_combo.addItem(label, p.device)
+            haystack = f"{p.description or ''} {getattr(p, 'manufacturer', '') or ''}".lower()
+            if "arduino" in haystack or "mega" in haystack:
+                arduino_idx = i
+        self._url_combo.addItem("socket://localhost:9999/", "socket://localhost:9999/")
+        # Restore the prior device if still present; else prefer the Arduino.
+        restored = False
+        if prev:
+            for i in range(self._url_combo.count()):
+                if self._url_combo.itemData(i) == prev:
+                    self._url_combo.setCurrentIndex(i); restored = True; break
+            if not restored and prev.startswith("socket://"):
+                self._url_combo.setCurrentText(prev); restored = True
+        if not restored:
+            if arduino_idx >= 0:
+                self._url_combo.setCurrentIndex(arduino_idx)
+            elif ports:
+                self._url_combo.setCurrentIndex(0)
         self._url_combo.blockSignals(False)
+
+    def _selected_url(self) -> str:
+        """The actual port/URL to connect to: the selected item's device data
+        when a listed port is chosen, otherwise the text the user typed."""
+        combo = self._url_combo
+        idx = combo.currentIndex()
+        text = combo.currentText().strip()
+        if idx >= 0 and combo.itemText(idx) == text:
+            data = combo.itemData(idx)
+            if data:
+                return str(data)
+        return text
+
+    def _flush_initial_queries(self):
+        """Send the deferred connect-time get_param burst, once. Triggered by the
+        first status frame (MCU booted) or a fallback timer."""
+        if self._pending_initial_queries:
+            self._queue_queries(self._pending_initial_queries)
+            self._pending_initial_queries = None
 
     def _queue_queries(self, queries: list):
         """Append queries to the paced send queue (one every 40 ms) so a burst
@@ -149,7 +191,7 @@ class MainWindow(QMainWindow):
     def _on_connection_changed(self, connected: bool):
         self._set_connected(connected)
         if connected:
-            url = self._url_combo.currentText().strip()
+            url = self._selected_url()
             self._event_log.append("SYSTEM", f"Connected to {url}")
             # Pace these — sending all at once overruns the MCU RX buffer and
             # the later queries (the calibration ones) get silently dropped.
@@ -165,9 +207,20 @@ class MainWindow(QMainWindow):
                 {"cmd": "get_param", "key": "max_travel_mm_z"},
             ]
             queries += [{"cmd": "get_param", "key": f"tof_offset_{ch}"} for ch in range(4)]
-            self._queue_queries(queries)
-            self._sensor_timer.start(1000)   # poll sensors every 1 s (live ToF readout)
+            queries += [{"cmd": "get_param", "key": "tof_max_sigma_mm"},
+                        {"cmd": "get_param", "key": "tof_min_signal_kcps"}]
+            # Don't send yet — the Mega is mid-reset (DTR) and would drop these.
+            # Fire them on the first status frame (proof it's booted); a fallback
+            # timer covers the unlikely case no status arrives. The sim sends
+            # status immediately, so this fires right away there.
+            self._pending_initial_queries = queries
+            QTimer.singleShot(3000, self._flush_initial_queries)
+            # ToF distances now ride in the 4 Hz status broadcast (push), so we no
+            # longer poll query_sensors — that command stream was congesting the
+            # MCU RX buffer and dropping the occasional user command. The manual
+            # "Refresh Readings" button still sends a one-shot query_sensors.
         else:
+            self._pending_initial_queries = None
             self._query_queue.clear()
             self._query_timer.stop()
             self._event_log.append("SYSTEM", "Disconnected")
@@ -179,6 +232,12 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage(f"Error: {msg}")
         self._set_connected(False)
         self._conn_btn.setText("Connect")
+
+    def _on_command_failed(self, msg: dict):
+        verb = msg.get("cmd", "?")
+        self._event_log.append("SYSTEM",
+            f"Command not confirmed after retries: {verb} — check the connection")
+        self._status_bar.showMessage(f"Command dropped: {verb}", 4000)
 
     def _set_connected(self, connected: bool):
         self._conn_light.set_bool(connected, "green", "red")
@@ -255,9 +314,16 @@ class MainWindow(QMainWindow):
         msg_type = msg.get("type")
 
         if msg_type == "status":
+            if self._pending_initial_queries:
+                self._flush_initial_queries()
             self._run_tab.on_status(msg)
             self._cal_tab.on_status(msg)
             self._svc_tab.on_status(msg)
+            # ToF now rides in the status frame (push), so feed the live readouts
+            # straight from it — no separate query_sensors poll needed.
+            if "tof" in msg:
+                self._svc_tab.on_sensors(msg)
+                self._cal_tab.on_sensors(msg)
             state = msg.get("state", "")
             if state != self._last_state:
                 fault = msg.get("fault")
@@ -328,6 +394,8 @@ class MainWindow(QMainWindow):
                     elif key.startswith("tof_offset_"):
                         ch = int(key.split("_")[-1])
                         self._cal_tab.set_baseline(ch, float(value))
+                    elif key in ("tof_max_sigma_mm", "tof_min_signal_kcps"):
+                        self._cal_tab.set_tof_threshold_value(key, float(value))
             elif cmd == "calibrate_sensors":
                 offsets = msg.get("offsets", [])
                 self._cal_tab.on_cal_ack(offsets)

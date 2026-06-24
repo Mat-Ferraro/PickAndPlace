@@ -48,6 +48,7 @@ void setup() {
   machine.begin();          // pin modes, servos attached, outputs off
   controls.begin();         // button / E-stop inputs
   config.load();            // populate from EEPROM; safe defaults on first boot
+  machine.setTofThresholds(config.tofMaxSigmaMm, config.tofMinSignalKcps);
   protocol.begin(Serial);
 }
 

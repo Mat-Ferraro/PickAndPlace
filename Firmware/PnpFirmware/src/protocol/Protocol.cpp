@@ -46,9 +46,29 @@ void Protocol::handleLine(const char* line, uint32_t nowMs) {
   cmd.servo    = doc["servo"]    | "";    // set_servo name
   cmd.position = doc["position"] | "";    // set_servo position
 
+  // Exempt from de-dup: queries (their reply carries the data, so they must
+  // re-run) and the chunked-upload verbs (which reuse one id by design and use a
+  // synchronous handshake, never the retry path).
+  bool dedupExempt =
+      (cmd.name[0] == 'q') ||
+      (cmd.name[0] == 'g' && cmd.name[1] == 'e' && cmd.name[2] == 't') ||
+      PNP_STREQ(cmd.name, "begin_transfer") ||
+      PNP_STREQ(cmd.name, "program_chunk")  ||
+      PNP_STREQ(cmd.name, "end_transfer");
+  if (cmd.id > 0 && !dedupExempt && sm_.isDuplicateCommand(cmd.id)) {
+    JsonDocument dup;            // re-ack a retry; state unchanged, skip status
+    dup["type"] = "ack";
+    dup["id"]   = cmd.id;
+    dup["cmd"]  = cmd.name;
+    serializeJson(dup, *io_);
+    io_->println();
+    return;
+  }
+
   Response r = sm_.handleCommand(cmd, nowMs);
+  if (r.kind == Response::Ack && cmd.id > 0 && !dedupExempt) sm_.rememberCommand(cmd.id);
   sendResponse(r);
-  sendStatus();   // push fresh state immediately after a command
+  sendStatus(false);   // immediate state feedback; ToF rides the periodic push
 }
 
 void Protocol::sendResponse(const Response& r) {
@@ -79,7 +99,7 @@ void Protocol::sendResponse(const Response& r) {
   io_->println();
 }
 
-void Protocol::sendStatus() {
+void Protocol::sendStatus(bool withTof) {
   if (!io_) return;
   StatusSnapshot s = sm_.buildStatus();
   JsonDocument out;
@@ -100,6 +120,22 @@ void Protocol::sendStatus() {
   out["inputs"]["estop_hw"]  = s.estopHw;
   out["inputs"]["start_btn"] = s.startBtn;
   out["inputs"]["pause_btn"] = s.pauseBtn;
+  // Live ToF distances ride in the status broadcast (push) so the GUI doesn't
+  // need a separate query_sensors poll — which kept the MCU RX buffer busy and
+  // occasionally dropped user commands. Included every kStatusTofEvery-th frame
+  // to bound outbound traffic; the GUI holds its last reading on skipped frames.
+  if (withTof && (kStatusTofEvery <= 1 || (statusCount_ % kStatusTofEvery) == 0)) {
+    float td[6]; bool tv[6];
+    sm_.readTof(td, tv);
+    JsonArray tof = out["tof"].to<JsonArray>();
+    for (int c = 0; c < 6; c++) {
+      JsonObject o = tof.add<JsonObject>();
+      o["ch"]      = c;
+      o["dist_mm"] = td[c];
+      o["valid"]   = tv[c];
+    }
+  }
+  statusCount_++;
   serializeJson(out, *io_);
   io_->println();
 }

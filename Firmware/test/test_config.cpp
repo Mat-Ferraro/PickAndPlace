@@ -42,14 +42,32 @@ void test_config_is_valid_after_updateCrc(void) {
     TEST_ASSERT_TRUE(cfg.isValid());
 }
 
-void test_version5_config_has_correct_version(void) {
+void test_version_config_has_correct_version(void) {
     Config cfg;
     cfg.updateCrc();
-    TEST_ASSERT_EQUAL(5, cfg.version);
+    TEST_ASSERT_EQUAL(6, cfg.version);
     TEST_ASSERT_TRUE(cfg.isValid());
 }
 
 // ---- save / load round-trip ----
+
+void test_tof_thresholds_persist(void) {
+    Config a;
+    a.tofMaxSigmaMm    = 8;
+    a.tofMinSignalKcps = 250;
+    a.save();
+
+    Config b;
+    TEST_ASSERT_TRUE(b.load());
+    TEST_ASSERT_EQUAL_UINT16(8,   b.tofMaxSigmaMm);
+    TEST_ASSERT_EQUAL_UINT16(250, b.tofMinSignalKcps);
+}
+
+void test_tof_thresholds_default_when_unset(void) {
+    Config c;
+    TEST_ASSERT_EQUAL_UINT16(15, c.tofMaxSigmaMm);
+    TEST_ASSERT_EQUAL_UINT16(0,  c.tofMinSignalKcps);
+}
 
 void test_save_then_load_round_trips_defaults(void) {
     Config a;
@@ -244,7 +262,9 @@ int main(void) {
     RUN_TEST(test_crc_is_deterministic);
     RUN_TEST(test_default_config_is_invalid);
     RUN_TEST(test_config_is_valid_after_updateCrc);
-    RUN_TEST(test_version5_config_has_correct_version);
+    RUN_TEST(test_version_config_has_correct_version);
+    RUN_TEST(test_tof_thresholds_persist);
+    RUN_TEST(test_tof_thresholds_default_when_unset);
     RUN_TEST(test_save_then_load_round_trips_defaults);
     RUN_TEST(test_all_four_stepper_axes_persist);
     RUN_TEST(test_y_is_single_shared_value);
